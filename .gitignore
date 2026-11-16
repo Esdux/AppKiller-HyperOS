@@ -21,3 +21,5 @@ tools/
 .idea/
 *.iml
 .DS_Store
+verify/
+shots/
