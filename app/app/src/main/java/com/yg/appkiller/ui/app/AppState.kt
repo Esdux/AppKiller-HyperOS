@@ -14,6 +14,7 @@ data class AppState(
     val themeColorSpec: Int = 0,
     val themePaletteStyle: Int = 0,
     val blur: Boolean = isRenderEffectSupported(),
+    val liquidGlass: Boolean = true,
     val enablePageUserScroll: Boolean = true,
     val enableScrollEndHaptic: Boolean = true,
     val enableCornerClip: Boolean = true,

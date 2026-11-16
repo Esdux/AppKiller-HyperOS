@@ -18,6 +18,7 @@ import com.yg.appkiller.ui.app.LocalAppState
 import com.yg.appkiller.ui.app.LocalUpdateAppState
 import com.yg.appkiller.ui.utils.BackgroundManager
 import com.yg.appkiller.ui.utils.MiuixBackground
+import com.yg.appkiller.ui.utils.UiPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -37,7 +38,7 @@ fun AppRoot() {
             runCatching { BackgroundManager.init(ctx) }
         }
     }
-    var appState by remember { mutableStateOf(AppState()) }
+    var appState by remember { mutableStateOf(AppState(liquidGlass = UiPrefs.liquidGlass(ctx))) }
     AppTheme(
         uiStyle = appState.uiStyle,
         colorMode = appState.colorMode,

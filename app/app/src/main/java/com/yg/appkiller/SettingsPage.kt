@@ -39,6 +39,7 @@ import com.yg.appkiller.ui.utils.CirnoCard
 import com.yg.appkiller.ui.utils.LocalImageBackdrop
 import com.yg.appkiller.ui.utils.pageContentPadding
 import com.yg.appkiller.ui.utils.pageScrollModifiers
+import com.yg.appkiller.ui.utils.UiPrefs
 import com.yg.appkiller.ui.utils.rememberBlurBackdrop
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -340,6 +341,15 @@ private fun SettingsContent(
                         items = listOf("跟随系统", "浅色", "深色", "莫奈跟随系统", "莫奈浅色", "莫奈深色"),
                         selectedIndex = appState.colorMode.coerceIn(0, 5),
                         onSelectedIndexChange = { updateAppState { s -> s.copy(colorMode = it) } },
+                    )
+                    SwitchPreference(
+                        title = "液态玻璃导航栏",
+                        summary = "关闭后回退为普通胶囊底栏",
+                        checked = appState.liquidGlass,
+                        onCheckedChange = { on ->
+                            UiPrefs.setLiquidGlass(ctx, on)
+                            updateAppState { s -> s.copy(liquidGlass = on) }
+                        },
                     )
                     SwitchPreference(
                         title = "模糊效果",
