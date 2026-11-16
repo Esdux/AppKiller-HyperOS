@@ -1,12 +1,4 @@
 package com.yg.appkiller
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.runtime.CompositionLocalProvider
-import com.yg.appkiller.ui.app.LocalUpdateAppState
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.WindowInsetsSides
-import androidx.compose.foundation.layout.add
-import androidx.compose.foundation.layout.displayCutout
-import androidx.compose.foundation.layout.only
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -16,15 +8,21 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,11 +39,12 @@ import androidx.compose.ui.unit.sp
 import com.yg.appkiller.ui.app.AppState
 import com.yg.appkiller.ui.app.AppTheme
 import com.yg.appkiller.ui.app.LocalAppState
+import com.yg.appkiller.ui.app.LocalUpdateAppState
 import com.yg.appkiller.ui.utils.AdaptiveTopAppBar
 import com.yg.appkiller.ui.utils.BlurredBar
-import com.yg.appkiller.ui.utils.CirnoCard
 import com.yg.appkiller.ui.utils.MiuixBackground
 import com.yg.appkiller.ui.utils.UiPrefs
+import com.yg.appkiller.ui.utils.pageContentPadding
 import com.yg.appkiller.ui.utils.pageScrollModifiers
 import com.yg.appkiller.ui.utils.rememberBlurBackdrop
 import kotlinx.coroutines.Dispatchers
@@ -55,12 +54,12 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
-import top.yukonga.miuix.kmp.basic.SmallTitle
-import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
 class AppDetailActivity : ComponentActivity() {
@@ -69,7 +68,7 @@ class AppDetailActivity : ComponentActivity() {
         val pkg = intent.getStringExtra("pkg") ?: ""
         val label = intent.getStringExtra("label") ?: pkg
         setContent {
-            val appState = remember { AppState(liquidGlass = UiPrefs.liquidGlass(this)) }
+            var appState by remember { mutableStateOf(AppState(liquidGlass = UiPrefs.liquidGlass(this))) }
             AppTheme(
                 uiStyle = appState.uiStyle,
                 colorMode = appState.colorMode,
@@ -78,7 +77,7 @@ class AppDetailActivity : ComponentActivity() {
             ) {
                 CompositionLocalProvider(
                     LocalAppState provides appState,
-                    LocalUpdateAppState provides { _ -> },
+                    LocalUpdateAppState provides { transform -> appState = transform(appState) },
                 ) {
                     MiuixBackground {
                         AppDetailScreen(pkg = pkg, label = label, onBack = { finish() })
@@ -91,43 +90,51 @@ class AppDetailActivity : ComponentActivity() {
 
 @Composable
 private fun AppDetailScreen(pkg: String, label: String, onBack: () -> Unit) {
-    val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val scrollBehavior = MiuixScrollBehavior()
+    val appState = LocalAppState.current
 
     var inWhite by remember { mutableStateOf(false) }
     var inBlack by remember { mutableStateOf(false) }
-    var perAppMode by remember { mutableStateOf("-") }
-    var perAppScope by remember { mutableStateOf("-") }
+    var modeIndex by remember { mutableStateOf(0) }
+    var scopeIndex by remember { mutableStateOf(0) }
     var procs by remember { mutableStateOf<List<Ctrl.ProcEntry>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var msg by remember { mutableStateOf("") }
 
-    LaunchedEffect(Unit) {
-        val d = withContext(Dispatchers.IO) {
-            val w = ModuleRepo.list("protect.list").toSet()
-            val b = ModuleRepo.list("blacklist.list").toSet()
-            val pa = Ctrl.getPerApp(pkg)
-            val ps = Ctrl.procs(pkg)
-            arrayOf<Any>(w, b, pa, ps)
-        }
-        inWhite = (d[0] as Set<String>).contains(pkg)
-        inBlack = (d[1] as Set<String>).contains(pkg)
-        val pa = d[2] as Pair<String, String>
-        perAppMode = pa.first
-        perAppScope = pa.second
-        procs = d[3] as List<Ctrl.ProcEntry>
-        loading = false
-    }
+    val modeItems = listOf("跟随全局", "SIGKILL", "am kill", "强制停止")
+    val modeValues = listOf("-", "sigkill", "am_kill", "force_stop")
+    val scopeItems = listOf("跟随全局", "整个应用", "仅冻结进程")
+    val scopeValues = listOf("-", "pkg", "frozen")
 
-    val backdrop = rememberBlurBackdrop()
-    val blurActive = backdrop != null
+    fun refresh() {
+        scope.launch {
+            val d = withContext(Dispatchers.IO) {
+                val w = ModuleRepo.list("protect.list").toSet()
+                val b = ModuleRepo.list("blacklist.list").toSet()
+                val pa = Ctrl.getPerApp(pkg)
+                val ps = Ctrl.procs(pkg)
+                arrayOf<Any>(w, b, pa, ps)
+            }
+            inWhite = (d[0] as Set<String>).contains(pkg)
+            inBlack = (d[1] as Set<String>).contains(pkg)
+            val pa = d[2] as Pair<String, String>
+            modeIndex = modeValues.indexOf(pa.first).coerceAtLeast(0)
+            scopeIndex = scopeValues.indexOf(pa.second).coerceAtLeast(0)
+            procs = d[3] as List<Ctrl.ProcEntry>
+            loading = false
+        }
+    }
+    LaunchedEffect(Unit) { refresh() }
+
+    val imageBackdrop = com.yg.appkiller.ui.utils.LocalImageBackdrop.current
+    val backdrop = if (imageBackdrop != null) null else rememberBlurBackdrop()
+    val blurActive = imageBackdrop != null || backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
     Scaffold(
         containerColor = Color.Transparent,
-        contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout)
-            .only(WindowInsetsSides.Horizontal),
+        contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal),
         topBar = {
             BlurredBar(backdrop, blurActive, scrollBehavior) {
                 AdaptiveTopAppBar(
@@ -147,267 +154,229 @@ private fun AppDetailScreen(pkg: String, label: String, onBack: () -> Unit) {
                 )
             }
         },
-        popupHost = {},
     ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .pageScrollModifiers(true, true, scrollBehavior),
-            contentPadding = PaddingValues(
-                top = innerPadding.calculateTopPadding() + 12.dp,
-                start = 12.dp,
-                end = 12.dp,
-                bottom = 96.dp,
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+        val lazyListState = rememberLazyListState()
+        val contentPadding = pageContentPadding(innerPadding, innerPadding, false)
+        val listPadding = PaddingValues(
+            start = contentPadding.calculateStartPadding(androidx.compose.ui.unit.LayoutDirection.Ltr),
+            top = contentPadding.calculateTopPadding(),
+            end = contentPadding.calculateEndPadding(androidx.compose.ui.unit.LayoutDirection.Ltr),
+            bottom = 48.dp,
+        )
+        androidx.compose.foundation.layout.Box(
+            modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier
         ) {
-            /* 应用信息 */
-            item {
-                CirnoCard(insideMargin = PaddingValues(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        AppIcon(pkg = pkg, label = label, size = 48.dp)
-                        Spacer(Modifier.size(12.dp))
-                        Column {
-                            Text(text = label, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                            Text(text = pkg, fontSize = 13.sp, color = colorScheme.onSurfaceVariantSummary)
-                        }
-                    }
-                }
-            }
-
-            /* 名单设置 */
-            item {
-                SmallTitle(text = "名单设置")
-            }
-            item {
-                CirnoCard(insideMargin = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(text = "白名单（豁免清理）", fontSize = 15.sp)
-                            Text(text = "加入后该应用永不被清理", fontSize = 12.sp, color = colorScheme.onSurfaceVariantSummary)
-                        }
-                        Switch(
-                            checked = inWhite,
-                            onCheckedChange = { v ->
-                                inWhite = v
-                                if (v) inBlack = false
-                                scope.launch {
-                                    withContext(Dispatchers.IO) { saveLists(pkg, inWhite, inBlack) }
-                                    msg = if (v) "已加入白名单" else "已移出白名单"
-                                }
-                            },
-                        )
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(text = "黑名单（强制清理）", fontSize = 15.sp)
-                            Text(text = "即使系统应用也按超时清理", fontSize = 12.sp, color = colorScheme.onSurfaceVariantSummary)
-                        }
-                        Switch(
-                            checked = inBlack,
-                            onCheckedChange = { v ->
-                                inBlack = v
-                                if (v) inWhite = false
-                                scope.launch {
-                                    withContext(Dispatchers.IO) { saveLists(pkg, inWhite, inBlack) }
-                                    msg = if (v) "已加入黑名单" else "已移出黑名单"
-                                }
-                            },
-                        )
-                    }
-                }
-            }
-
-            /* 清理方式 */
-            item {
-                SmallTitle(text = "清理方式")
-            }
-            item {
-                CirnoCard(insideMargin = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
-                    val modes = listOf("sigkill", "am_kill", "force_stop")
-                    val modeLabels = listOf("SIGKILL（直接杀进程）", "am kill（系统回收）", "force-stop（强制停止）")
-                    modes.forEachIndexed { i, m ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = modeLabels[i],
-                                fontSize = 14.sp,
-                                modifier = Modifier.weight(1f),
-                                color = if (perAppMode == m) colorScheme.primary else colorScheme.onSurface,
-                            )
-                            Switch(
-                                checked = perAppMode == m,
-                                onCheckedChange = { v ->
-                                    if (v) {
-                                        perAppMode = m
-                                        scope.launch {
-                                            withContext(Dispatchers.IO) { Ctrl.setPerApp(pkg, m, perAppScope) }
-                                            msg = "清理方式: " + m
-                                        }
-                                    } else if (perAppMode == m) {
-                                        perAppMode = "-"
-                                        scope.launch {
-                                            withContext(Dispatchers.IO) { Ctrl.setPerApp(pkg, "-", perAppScope) }
-                                            msg = "清理方式: 跟随全局"
-                                        }
-                                    }
-                                },
-                            )
-                        }
-                    }
-                }
-            }
-
-            /* 清理范围 */
-            item {
-                SmallTitle(text = "清理范围")
-            }
-            item {
-                CirnoCard(insideMargin = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
-                    val scopes = listOf("pkg", "frozen")
-                    val scopeLabels = listOf("整包（所有后台进程）", "仅冻结进程")
-                    scopes.forEachIndexed { i, sc ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = scopeLabels[i],
-                                fontSize = 14.sp,
-                                modifier = Modifier.weight(1f),
-                                color = if (perAppScope == sc) colorScheme.primary else colorScheme.onSurface,
-                            )
-                            Switch(
-                                checked = perAppScope == sc,
-                                onCheckedChange = { v ->
-                                    if (v) {
-                                        perAppScope = sc
-                                        scope.launch {
-                                            withContext(Dispatchers.IO) { Ctrl.setPerApp(pkg, perAppMode, sc) }
-                                            msg = "清理范围: " + sc
-                                        }
-                                    } else if (perAppScope == sc) {
-                                        perAppScope = "-"
-                                        scope.launch {
-                                            withContext(Dispatchers.IO) { Ctrl.setPerApp(pkg, perAppMode, "-") }
-                                            msg = "清理范围: 跟随全局"
-                                        }
-                                    }
-                                },
-                            )
-                        }
-                    }
-                }
-            }
-
-            /* 进程列表 */
-            item {
-                SmallTitle(text = "进程列表")
-            }
-            if (procs.isEmpty()) {
+            LazyColumn(
+                state = lazyListState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pageScrollModifiers(appState.enableScrollEndHaptic, true, scrollBehavior),
+                contentPadding = listPadding,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                overscrollEffect = null,
+            ) {
+                /* 应用信息 */
+                item { GroupTitle("应用信息") }
                 item {
-                    CirnoCard(insideMargin = PaddingValues(16.dp)) {
-                        Text(
-                            text = if (loading) "加载中…" else "当前无运行中的进程",
-                            fontSize = 14.sp,
-                            color = colorScheme.onSurfaceVariantSummary,
-                        )
-                    }
-                }
-            } else {
-                items(procs, key = { it.pid }) { proc ->
-                    CirnoCard(insideMargin = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
+                    GroupCard {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().padding(14.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(text = proc.cmdline, fontSize = 14.sp)
+                            AppIcon(pkg = pkg, label = label, size = 48.dp)
+                            Spacer(Modifier.size(14.dp))
+                            Column {
+                                Text(text = label, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                                 Text(
-                                    text = "pid " + proc.pid + " · adj " + proc.adj +
-                                        (if (proc.frozen) " · 已冻结" else ""),
+                                    text = pkg,
                                     fontSize = 12.sp,
-                                    color = if (proc.frozen) Color(0xFFFF8C00) else colorScheme.onSurfaceVariantSummary,
+                                    color = colorScheme.onSurfaceVariantSummary,
+                                )
+                                Text(
+                                    text = when {
+                                        inBlack -> "黑名单 · 强制清理"
+                                        inWhite -> "白名单 · 豁免清理"
+                                        else -> "默认策略"
+                                    },
+                                    fontSize = 12.sp,
+                                    color = if (inBlack) Color(0xFFD13636) else colorScheme.primary,
+                                    modifier = Modifier.padding(top = 2.dp),
                                 )
                             }
-                            /* 每进程模式：默认 / skip */
-                            val isSkip = proc.mode == "skip"
-                            TextButton(
-                                text = if (isSkip) "跳过" else "默认",
-                                onClick = {
-                                    scope.launch {
-                                        val newMode = if (isSkip) "-" else "skip"
-                                        withContext(Dispatchers.IO) { Ctrl.setPerProc(proc.cmdline, newMode) }
-                                        procs = procs.map {
-                                            if (it.pid == proc.pid) it.copy(mode = newMode) else it
-                                        }
-                                        msg = proc.cmdline + ": " + (if (isSkip) "恢复默认" else "已跳过")
-                                    }
-                                },
-                            )
                         }
                     }
                 }
-            }
 
-            /* 操作 */
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    TextButton(
-                        text = "立即清理",
-                        onClick = {
-                            scope.launch {
-                                val r = withContext(Dispatchers.IO) { Ctrl.killPkg(pkg) }
-                                msg = "清理结果: " + r.trim()
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    TextButton(
-                        text = "刷新进程",
-                        onClick = {
-                            scope.launch {
-                                procs = withContext(Dispatchers.IO) { Ctrl.procs(pkg) }
-                                msg = "已刷新"
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
-
-            /* 状态提示 */
-            if (msg.isNotEmpty()) {
+                /* 名单 */
+                item { GroupTitle("名单设置") }
                 item {
-                    Text(
-                        text = msg,
-                        fontSize = 13.sp,
-                        color = colorScheme.primary,
-                        modifier = Modifier.padding(start = 4.dp),
-                    )
+                    GroupCard {
+                        SwitchRow(
+                            title = "白名单",
+                            summary = "加入后该应用永不被清理",
+                            checked = inWhite,
+                            onCheckedChange = { v ->
+                                scope.launch {
+                                    withContext(Dispatchers.IO) { saveLists(pkg, v, false) }
+                                    msg = if (v) "已加入白名单" else "已移出白名单"
+                                    refresh()
+                                }
+                            },
+                        )
+                        SwitchRow(
+                            title = "黑名单",
+                            summary = "即使系统应用也按超时清理",
+                            checked = inBlack,
+                            onCheckedChange = { v ->
+                                scope.launch {
+                                    withContext(Dispatchers.IO) { saveLists(pkg, false, v) }
+                                    msg = if (v) "已加入黑名单" else "已移出黑名单"
+                                    refresh()
+                                }
+                            },
+                        )
+                    }
+                }
+
+                /* 清理配置 */
+                item { GroupTitle("清理配置") }
+                item {
+                    GroupCard {
+                        OverlayDropdownPreference(
+                            items = modeItems,
+                            selectedIndex = modeIndex,
+                            title = "清理方式",
+                            onSelectedIndexChange = { i ->
+                                modeIndex = i
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        Ctrl.setPerApp(pkg, modeValues[i], scopeValues[scopeIndex])
+                                    }
+                                    msg = "清理方式: " + modeItems[i]
+                                }
+                            },
+                        )
+                        OverlayDropdownPreference(
+                            items = scopeItems,
+                            selectedIndex = scopeIndex,
+                            title = "清理范围",
+                            onSelectedIndexChange = { i ->
+                                scopeIndex = i
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        Ctrl.setPerApp(pkg, modeValues[modeIndex], scopeValues[i])
+                                    }
+                                    msg = "清理范围: " + scopeItems[i]
+                                }
+                            },
+                        )
+                    }
+                }
+
+                /* 进程 */
+                item { GroupTitle("进程列表") }
+                item {
+                    GroupCard {
+                        if (loading) {
+                            Text(
+                                text = "加载中…",
+                                fontSize = 14.sp,
+                                color = colorScheme.onSurfaceVariantSummary,
+                                modifier = Modifier.padding(14.dp),
+                            )
+                        } else if (procs.isEmpty()) {
+                            Text(
+                                text = "当前无运行中的进程",
+                                fontSize = 14.sp,
+                                color = colorScheme.onSurfaceVariantSummary,
+                                modifier = Modifier.padding(14.dp),
+                            )
+                        } else {
+                            procs.forEach { proc ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(text = proc.cmdline, fontSize = 14.sp)
+                                        Text(
+                                            text = "pid " + proc.pid + " · adj " + proc.adj +
+                                                if (proc.frozen) " · 已冻结" else "",
+                                            fontSize = 12.sp,
+                                            color = if (proc.frozen) Color(0xFFFF8C00)
+                                            else colorScheme.onSurfaceVariantSummary,
+                                        )
+                                    }
+                                    TextButton(
+                                        text = if (proc.mode == "skip") "跳过" else "默认",
+                                        onClick = {
+                                            scope.launch {
+                                                val nm = if (proc.mode == "skip") "-" else "skip"
+                                                withContext(Dispatchers.IO) {
+                                                    Ctrl.setPerProc(proc.cmdline, nm)
+                                                }
+                                                msg = proc.cmdline + ": " +
+                                                    if (nm == "skip") "已跳过" else "恢复默认"
+                                                refresh()
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                /* 操作 */
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        TextButton(
+                            text = "立即清理",
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                scope.launch {
+                                    val r = withContext(Dispatchers.IO) {
+                                        Ctrl.killPkg(pkg, "force_stop")
+                                    }
+                                    msg = "清理结果: " + r.trim()
+                                    refresh()
+                                }
+                            },
+                        )
+                        TextButton(
+                            text = "刷新进程",
+                            modifier = Modifier.weight(1f),
+                            onClick = { refresh() },
+                        )
+                    }
+                }
+
+                if (msg.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = msg,
+                            fontSize = 13.sp,
+                            color = colorScheme.primary,
+                            modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+                        )
+                    }
                 }
             }
         }
     }
 }
 
-/** 保存黑白名单变更 */
-private fun saveLists(pkg: String, inWhite: Boolean, inBlack: Boolean) {
+/** 保存黑白名单变更（互斥） */
+private fun saveLists(pkg: String, wantWhite: Boolean, wantBlack: Boolean) {
     val w = ModuleRepo.list("protect.list").toMutableSet()
     val b = ModuleRepo.list("blacklist.list").toMutableSet()
-    if (inWhite) { w.add(pkg); b.remove(pkg) } else w.remove(pkg)
-    if (inBlack) { b.add(pkg); w.remove(pkg) } else b.remove(pkg)
+    if (wantWhite) { w.add(pkg); b.remove(pkg) } else w.remove(pkg)
+    if (wantBlack) { b.add(pkg); w.remove(pkg) } else b.remove(pkg)
     ModuleRepo.writeList("protect.list", "# 保护名单", w)
     ModuleRepo.writeList("blacklist.list", "# 黑名单", b)
     ModuleRepo.reload()

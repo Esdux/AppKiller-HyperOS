@@ -1,4 +1,8 @@
 package com.yg.appkiller.ui.app
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.systemBars
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -94,6 +98,7 @@ fun AppContent() {
     // MiuixPopupHost 弹层宿主；裸 Box 里对话框不渲染（导入名单候选框消失的根因）。
     Scaffold(
         containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Horizontal),
     ) { innerPadding ->
     Box(Modifier.fillMaxSize().padding(innerPadding)) {
         HorizontalPager(

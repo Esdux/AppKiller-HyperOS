@@ -903,6 +903,11 @@ int pkg_has_visible(const char *pkg) {
         if (strcmp(pk, pkg) != 0) continue;
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN || adj < 0) continue;
+        /* 冻结中的进程不可能在前台：adj 检查只约束未冻结进程 */
+        int st = read_proc_state(pid);
+        char cg[PATH_LEN];
+        if (read_cgroup(pid, cg, sizeof(cg)) != 0) cg[0] = '\0';
+        if (proc_is_frozen(pid, cg, st)) continue;
         if (adj < g_cfg.active_adj) { found = 1; break; }
     }
     closedir(d);
@@ -916,7 +921,7 @@ static int am_command(const char *sub, const char *pkg) {
     if (p == 0) {
         int nul = open("/dev/null", O_WRONLY);
         if (nul >= 0) { dup2(nul, STDOUT_FILENO); dup2(nul, STDERR_FILENO); close(nul); }
-        execl("/system/bin/am", "am", sub, "--user", "0", pkg, (char *)NULL);
+        execl("/system/bin/am", "am", sub, pkg, (char *)NULL);
         _exit(127);
     }
     if (p < 0) return 0;
@@ -935,6 +940,61 @@ static int am_command(const char *sub, const char *pkg) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+/* 把冻结中的 pid 移出 /frozen 解冻：冻结态下信号不投递，必须先 thaw 再 kill */
+static void thaw_pid(int pid) {
+    char cg[PATH_LEN];
+    if (read_cgroup(pid, cg, sizeof(cg)) != 0) return;
+    if (strncmp(cg, "/frozen", 7) != 0) return;
+    FILE *f = fopen("/sys/fs/cgroup/unfrozen/cgroup.procs", "w");
+    if (!f) return;
+    fprintf(f, "%d", pid);
+    fclose(f);
+}
+
+/* am/force-stop 之后兜底：仍活着的后台进程 thaw + SIGKILL */
+static int sweep_survivors(const char *pkg, const char *scope, int *killed,
+                           char *pidlist, size_t pidn) {
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *e;
+    int any = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        int pid = atoi(e->d_name);
+        if (pid <= 1) continue;
+        char raw[512];
+        if (read_cmdline(pid, raw, sizeof(raw)) != 0) continue;
+        if (raw[0] == '/') continue;
+        char pk[PKG_LEN];
+        normalize_pkg(raw, pk, sizeof(pk));
+        if (strcmp(pk, pkg) != 0) continue;
+        int adj = read_oom_adj(pid);
+        if (adj == INT_MIN || adj < 0) continue;
+        perproc_t *pp = perproc_lookup(raw);
+        if (pp && !strcmp(pp->mode, "skip")) continue;
+        int state = read_proc_state(pid);
+        char cg[PATH_LEN];
+        if (read_cgroup(pid, cg, sizeof(cg)) != 0) cg[0] = '\0';
+        int frz = proc_is_frozen(pid, cg, state);
+        if (!frz && adj < g_cfg.active_adj) continue;
+        if (!strcmp(scope, "frozen") && !frz) continue;
+        any = 1;
+        if (pidlist && pidn > 1) {
+            size_t used = strlen(pidlist);
+            char num[12];
+            snprintf(num, sizeof(num), "%d", pid);
+            if (used + strlen(num) + 2 < pidn) {
+                if (used) strncat(pidlist, ",", pidn - used - 1);
+                strncat(pidlist, num, pidn - strlen(pidlist) - 1);
+            }
+        }
+        thaw_pid(pid);
+        if (kill(pid, SIGKILL) == 0 && killed) (*killed)++;
+    }
+    closedir(d);
+    return any;
+}
+
 int kill_package(const char *pkg, const char *scope, const char *mode,
                  int dry_run, int *killed, char *pidlist, size_t pidn) {
     if (killed) *killed = 0;
@@ -943,7 +1003,12 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
 
     if (!strcmp(mode, "am_kill") || !strcmp(mode, "force_stop")) {
         if (dry_run) return 1;
-        return am_command(!strcmp(mode, "am_kill") ? "kill" : "force-stop", pkg);
+        int ok = am_command(!strcmp(mode, "am_kill") ? "kill" : "force-stop", pkg);
+        usleep(300000);
+        /* 冻结进程收不到 am 的杀信号：兜底 thaw+SIGKILL */
+        int left = sweep_survivors(pkg, scope, killed, pidlist, pidn);
+        if (left) log_msg("sweep pkg=%s survivors killed=%d", pkg, killed ? *killed : 0);
+        return ok || !left;
     }
 
     DIR *d = opendir("/proc");
@@ -974,18 +1039,20 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN) continue;
         if (adj < 0) continue;
-        if (adj < g_cfg.active_adj) continue;   /* 双保险：可见进程绝不动 */
+
+        /* 冻结判定先行：冻结中的进程不可能可见，adj 检查只约束未冻结进程
+         * （HyperOS greeze 冻结不改 oom_score_adj，实测 adj=0 仍被冻） */
+        int st0 = read_proc_state(pid);
+        char cg0[PATH_LEN];
+        if (read_cgroup(pid, cg0, sizeof(cg0)) != 0) cg0[0] = '\0';
+        int frz0 = proc_is_frozen(pid, cg0, st0);
+        if (!frz0 && adj < g_cfg.active_adj) continue;   /* 未冻结且可见：绝不动 */
 
         /* 每进程覆盖：skip = 跳过该进程 */
         perproc_t *pp = perproc_lookup(raw);
         if (pp && !strcmp(pp->mode, "skip")) continue;
 
-        if (!strcmp(scope, "frozen")) {
-            int state = read_proc_state(pid);
-            char cg[PATH_LEN];
-            if (read_cgroup(pid, cg, sizeof(cg)) != 0) cg[0] = '\0';
-            if (!proc_is_frozen(pid, cg, state)) continue;
-        }
+        if (!strcmp(scope, "frozen") && !frz0) continue;
 
         any = 1;
         if (pidlist && pidn > 1) {
@@ -998,6 +1065,7 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
             }
         }
         if (!dry_run) {
+            thaw_pid(pid);
             if (kill(pid, SIGKILL) == 0 && killed) (*killed)++;
         } else if (killed) {
             (*killed)++;
@@ -1320,7 +1388,7 @@ static void ctl_handle(int c, char *req) {
             if (!isdigit((unsigned char)de->d_name[0])) continue;
             int pid = atoi(de->d_name);
             char raw[PKG_LEN];
-            if (read_cmdline(pid, raw, sizeof(raw)) <= 0) continue;
+            if (read_cmdline(pid, raw, sizeof(raw)) != 0) continue;
             char norm[PKG_LEN];
             normalize_pkg(raw, norm, sizeof(norm));
             if (strcmp(norm, pkg) != 0) continue;
