@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +52,11 @@ static char g_systemlist[MAX_PROTECT][PKG_LEN];
 static int  g_systemlist_n = 0;
 static char g_immortal[MAX_PROTECT][PKG_LEN];
 static int  g_immortal_n = 0;
+
+static perapp_t  g_perapp[MAX_PERAPP];
+static int       g_perapp_n = 0;
+static perproc_t g_perproc[MAX_PERPROC];
+static int       g_perproc_n = 0;
 
 static pkgent_t g_pkgs[MAX_PKGS];
 static int      g_pkg_n = 0;
@@ -175,6 +181,8 @@ void cfg_defaults(void) {
     snprintf(g_cfg.blacklist_file, sizeof(g_cfg.blacklist_file), "%s", "blacklist.list");
     snprintf(g_cfg.system_list_file, sizeof(g_cfg.system_list_file), "%s", "system_apps.list");
     snprintf(g_cfg.immortal_file, sizeof(g_cfg.immortal_file), "%s", "immortal.list");
+    snprintf(g_cfg.perapp_file, sizeof(g_cfg.perapp_file), "%s", "perapp.conf");
+    snprintf(g_cfg.perproc_file, sizeof(g_cfg.perproc_file), "%s", "perproc.conf");
     /* 沿用 Cirno：系统应用默认整体豁免，只有黑名单可以覆盖 */
     snprintf(g_cfg.system_default, sizeof(g_cfg.system_default), "%s", "protect");
     snprintf(g_cfg.user_default, sizeof(g_cfg.user_default), "%s", "manage");
@@ -204,6 +212,8 @@ static void cfg_assign(const char *k, const char *v) {
     else if (ci_eq(k, "BLACKLIST_FILE"))        snprintf(g_cfg.blacklist_file, sizeof(g_cfg.blacklist_file), "%s", v);
     else if (ci_eq(k, "SYSTEM_LIST_FILE"))      snprintf(g_cfg.system_list_file, sizeof(g_cfg.system_list_file), "%s", v);
     else if (ci_eq(k, "IMMORTAL_FILE"))        snprintf(g_cfg.immortal_file, sizeof(g_cfg.immortal_file), "%s", v);
+    else if (ci_eq(k, "PERAPP_FILE"))           snprintf(g_cfg.perapp_file, sizeof(g_cfg.perapp_file), "%s", v);
+    else if (ci_eq(k, "PERPROC_FILE"))          snprintf(g_cfg.perproc_file, sizeof(g_cfg.perproc_file), "%s", v);
     else if (ci_eq(k, "SYSTEM_DEFAULT"))       snprintf(g_cfg.system_default, sizeof(g_cfg.system_default), "%s", v);
     else if (ci_eq(k, "USER_DEFAULT"))         snprintf(g_cfg.user_default, sizeof(g_cfg.user_default), "%s", v);
 }
@@ -345,6 +355,168 @@ static int system_list_from_pm(void) {
     }
     pclose(p);
     return g_systemlist_n;
+}
+
+/* ---- 每应用 / 每进程覆盖配置 ----
+ * perapp.conf 行格式:  <包名> mode=<sigkill|am_kill|force_stop> scope=<pkg|frozen>
+ * perproc.conf 行格式: <进程名> mode=<sigkill|skip>
+ */
+static int valid_mode(const char *m) {
+    return !strcmp(m, "sigkill") || !strcmp(m, "am_kill") || !strcmp(m, "force_stop");
+}
+
+int perapp_load(const char *moddir) {
+    g_perapp_n = 0;
+    char p[PATH_LEN];
+    list_path(p, sizeof(p), g_cfg.perapp_file);
+    FILE *f = fopen(p, "r");
+    if (!f) return 0;
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), f) && g_perapp_n < MAX_PERAPP) {
+        char *t = trim(line);
+        if (!*t || *t == '#') continue;
+        char pkg[PKG_LEN] = ""; char mode[SMALL_LEN] = ""; char scope[SMALL_LEN] = "";
+        /* 解析: pkg [mode=X] [scope=Y] */
+        char *sp = t;
+        char *tok = strsep(&sp, " \t");
+        if (!tok) continue;
+        snprintf(pkg, sizeof(pkg), "%s", tok);
+        while (sp) {
+            tok = strsep(&sp, " \t");
+            if (!tok || !*tok) continue;
+            if (!strncasecmp(tok, "mode=", 5))  snprintf(mode, sizeof(mode), "%s", tok + 5);
+            else if (!strncasecmp(tok, "scope=", 6)) snprintf(scope, sizeof(scope), "%s", tok + 6);
+        }
+        if (!pkg[0]) continue;
+        if (mode[0] && !valid_mode(mode)) mode[0] = '\0';
+        if (scope[0] && strcmp(scope, "pkg") && strcmp(scope, "frozen")) scope[0] = '\0';
+        if (!mode[0] && !scope[0]) continue;
+        perapp_t *e = &g_perapp[g_perapp_n++];
+        snprintf(e->pkg, PKG_LEN, "%s", pkg);
+        snprintf(e->mode, SMALL_LEN, "%s", mode);
+        snprintf(e->scope, SMALL_LEN, "%s", scope);
+    }
+    fclose(f);
+    return g_perapp_n;
+}
+
+int perproc_load(const char *moddir) {
+    g_perproc_n = 0;
+    char p[PATH_LEN];
+    list_path(p, sizeof(p), g_cfg.perproc_file);
+    FILE *f = fopen(p, "r");
+    if (!f) return 0;
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), f) && g_perproc_n < MAX_PERPROC) {
+        char *t = trim(line);
+        if (!*t || *t == '#') continue;
+        char proc[PKG_LEN] = ""; char mode[SMALL_LEN] = "";
+        char *sp = t;
+        char *tok = strsep(&sp, " \t");
+        if (!tok) continue;
+        snprintf(proc, sizeof(proc), "%s", tok);
+        while (sp) {
+            tok = strsep(&sp, " \t");
+            if (!tok || !*tok) continue;
+            if (!strncasecmp(tok, "mode=", 5)) snprintf(mode, sizeof(mode), "%s", tok + 5);
+        }
+        if (!proc[0] || !mode[0]) continue;
+        if (strcmp(mode, "sigkill") && strcmp(mode, "skip")) continue;
+        perproc_t *e = &g_perproc[g_perproc_n++];
+        snprintf(e->proc, PKG_LEN, "%s", proc);
+        snprintf(e->mode, SMALL_LEN, "%s", mode);
+    }
+    fclose(f);
+    return g_perproc_n;
+}
+
+perapp_t *perapp_lookup(const char *pkg) {
+    for (int i = 0; i < g_perapp_n; i++)
+        if (strcmp(g_perapp[i].pkg, pkg) == 0) return &g_perapp[i];
+    return NULL;
+}
+
+perproc_t *perproc_lookup(const char *procname) {
+    for (int i = 0; i < g_perproc_n; i++)
+        if (strcmp(g_perproc[i].proc, procname) == 0) return &g_perproc[i];
+    return NULL;
+}
+
+/* 整份重写保存（条目少，直接全量写最简单可靠） */
+static int perapp_write_all(void) {
+    char p[PATH_LEN];
+    list_path(p, sizeof(p), g_cfg.perapp_file);
+    FILE *f = fopen(p, "w");
+    if (!f) return -1;
+    fprintf(f, "# 每应用覆盖配置：<包名> mode=<sigkill|am_kill|force_stop> scope=<pkg|frozen>\n");
+    for (int i = 0; i < g_perapp_n; i++) {
+        perapp_t *e = &g_perapp[i];
+        fprintf(f, "%s", e->pkg);
+        if (e->mode[0])  fprintf(f, " mode=%s", e->mode);
+        if (e->scope[0]) fprintf(f, " scope=%s", e->scope);
+        fputc('\n', f);
+    }
+    fclose(f);
+    return 0;
+}
+
+static int perproc_write_all(void) {
+    char p[PATH_LEN];
+    list_path(p, sizeof(p), g_cfg.perproc_file);
+    FILE *f = fopen(p, "w");
+    if (!f) return -1;
+    fprintf(f, "# 每进程覆盖配置：<进程名> mode=<sigkill|skip>\n");
+    for (int i = 0; i < g_perproc_n; i++)
+        fprintf(f, "%s mode=%s\n", g_perproc[i].proc, g_perproc[i].mode);
+    fclose(f);
+    return 0;
+}
+
+int perapp_save(const char *pkg, const char *mode, const char *scope) {
+    if (!pkg || !*pkg) return -1;
+    if (mode && mode[0] && !valid_mode(mode)) return -1;
+    if (scope && scope[0] && strcmp(scope, "pkg") && strcmp(scope, "frozen")) return -1;
+    perapp_t *e = perapp_lookup(pkg);
+    if ((!mode || !mode[0]) && (!scope || !scope[0])) {
+        /* 两项都空 = 删除该包的覆盖 */
+        if (e) {
+            int i = (int)(e - g_perapp);
+            memmove(&g_perapp[i], &g_perapp[i + 1], (g_perapp_n - i - 1) * sizeof(perapp_t));
+            g_perapp_n--;
+        }
+        return perapp_write_all();
+    }
+    if (!e) {
+        if (g_perapp_n >= MAX_PERAPP) return -1;
+        e = &g_perapp[g_perapp_n++];
+        memset(e, 0, sizeof(*e));
+        snprintf(e->pkg, PKG_LEN, "%s", pkg);
+    }
+    if (mode)  snprintf(e->mode, SMALL_LEN, "%s", mode);
+    if (scope) snprintf(e->scope, SMALL_LEN, "%s", scope);
+    return perapp_write_all();
+}
+
+int perproc_save(const char *procname, const char *mode) {
+    if (!procname || !*procname) return -1;
+    perproc_t *e = perproc_lookup(procname);
+    if (!mode || !mode[0]) {
+        if (e) {
+            int i = (int)(e - g_perproc);
+            memmove(&g_perproc[i], &g_perproc[i + 1], (g_perproc_n - i - 1) * sizeof(perproc_t));
+            g_perproc_n--;
+        }
+        return perproc_write_all();
+    }
+    if (strcmp(mode, "sigkill") && strcmp(mode, "skip")) return -1;
+    if (!e) {
+        if (g_perproc_n >= MAX_PERPROC) return -1;
+        e = &g_perproc[g_perproc_n++];
+        memset(e, 0, sizeof(*e));
+        snprintf(e->proc, PKG_LEN, "%s", procname);
+    }
+    snprintf(e->mode, SMALL_LEN, "%s", mode);
+    return perproc_write_all();
 }
 
 int system_list_load(const char *moddir) {
@@ -804,6 +976,10 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
         if (adj < 0) continue;
         if (adj < g_cfg.active_adj) continue;   /* 双保险：可见进程绝不动 */
 
+        /* 每进程覆盖：skip = 跳过该进程 */
+        perproc_t *pp = perproc_lookup(raw);
+        if (pp && !strcmp(pp->mode, "skip")) continue;
+
         if (!strcmp(scope, "frozen")) {
             int state = read_proc_state(pid);
             char cg[PATH_LEN];
@@ -874,14 +1050,22 @@ int decide_round(int dry_run) {
         long long dur = now - p->since;
         char pids[256];
         int cnt = 0;
-        int ok = kill_package(p->pkg, g_cfg.kill_scope, g_cfg.kill_mode,
+        /* 每应用覆盖配置优先于全局 */
+        const char *k_scope = g_cfg.kill_scope;
+        const char *k_mode  = g_cfg.kill_mode;
+        perapp_t *pa = perapp_lookup(p->pkg);
+        if (pa) {
+            if (pa->scope[0]) k_scope = pa->scope;
+            if (pa->mode[0])  k_mode  = pa->mode;
+        }
+        int ok = kill_package(p->pkg, k_scope, k_mode,
                               dry_run, &cnt, pids, sizeof(pids));
 
         log_msg("%spkg=%s frozen=%llds>=%ds uid=%d procs=%d scope=%s -> %s(%s) pids=[%s]",
                 dry_run ? "[dry-run] " : "",
                 p->pkg, dur, g_cfg.timeout_sec, p->uid, p->total,
-                g_cfg.kill_scope, ok ? "match" : "no-match",
-                g_cfg.kill_mode, pids);
+                k_scope, ok ? "match" : "no-match",
+                k_mode, pids);
 
         p->last_kill = now;   /* dry-run 也节流，避免每轮刷同一条日志 */
         if (!dry_run) {
@@ -893,7 +1077,7 @@ int decide_round(int dry_run) {
             h->procs = p->total;
             h->ok    = ok;
             snprintf(h->pkg, PKG_LEN, "%s", p->pkg);
-            snprintf(h->how, SMALL_LEN, "%s", g_cfg.kill_mode);
+            snprintf(h->how, SMALL_LEN, "%s", k_mode);
             g_hist_n++;
         }
         handled++;
@@ -1124,11 +1308,106 @@ static void ctl_handle(int c, char *req) {
         else ctl_reply(c, "ERR write\n");
         return;
     }
+    if (!strncmp(cmd, "PROCS ", 6)) {
+        /* 列出指定包名的所有进程：pid cmdline adj frozen perproc_mode */
+        char *pkg = trim(cmd + 6);
+        char buf[8192];
+        int off = 0;
+        DIR *d = opendir("/proc");
+        if (!d) { ctl_reply(c, "ERR proc\n"); return; }
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL && off < (int)sizeof(buf) - 256) {
+            if (!isdigit((unsigned char)de->d_name[0])) continue;
+            int pid = atoi(de->d_name);
+            char raw[PKG_LEN];
+            if (read_cmdline(pid, raw, sizeof(raw)) <= 0) continue;
+            char norm[PKG_LEN];
+            normalize_pkg(raw, norm, sizeof(norm));
+            if (strcmp(norm, pkg) != 0) continue;
+            int adj = read_oom_adj(pid);
+            int st = read_proc_state(pid);
+            char cg[256];
+            read_cgroup(pid, cg, sizeof(cg));
+            int frz = proc_is_frozen(pid, cg, st);
+            perproc_t *pp = perproc_lookup(raw);
+            off += snprintf(buf + off, sizeof(buf) - off,
+                "%d %s %d %d %s\n", pid, raw, adj, frz, pp ? pp->mode : "-");
+        }
+        closedir(d);
+        if (off == 0) { ctl_reply(c, "OK 0\n"); return; }
+        buf[off] = '\0';
+        ctl_reply(c, buf);
+        return;
+    }
+    if (!strncmp(cmd, "KILLPID ", 8)) {
+        int pid = atoi(cmd + 8);
+        if (pid <= 1) { ctl_reply(c, "ERR pid\n"); return; }
+        int adj = read_oom_adj(pid);
+        if (adj != INT_MIN && adj < g_cfg.active_adj) { ctl_reply(c, "ERR active\n"); return; }
+        int r = kill(pid, SIGKILL);
+        char b[64];
+        snprintf(b, sizeof(b), "%s\n", r == 0 ? "OK" : "ERR kill");
+        ctl_reply(c, b);
+        return;
+    }
+    if (!strncmp(cmd, "GETPERAPP ", 10)) {
+        char *pkg = trim(cmd + 10);
+        perapp_t *e = perapp_lookup(pkg);
+        char b[512];
+        if (e) snprintf(b, sizeof(b), "OK %s %s\n", e->mode[0] ? e->mode : "-", e->scope[0] ? e->scope : "-");
+        else   snprintf(b, sizeof(b), "OK - -\n");
+        ctl_reply(c, b);
+        return;
+    }
+    if (!strncmp(cmd, "SETPERAPP ", 10)) {
+        /* SETPERAPP <pkg> <mode|-> <scope|-> */
+        char *p2 = cmd + 10;
+        char *sp1 = strchr(p2, ' ');
+        if (!sp1) { ctl_reply(c, "ERR usage\n"); return; }
+        *sp1 = '\0';
+        char *pkg = trim(p2);
+        char *rest = trim(sp1 + 1);
+        char *sp2 = strchr(rest, ' ');
+        char *mode = rest; char *scope = NULL;
+        if (sp2) { *sp2 = '\0'; scope = trim(sp2 + 1); }
+        if (mode && strcmp(mode, "-") == 0) mode = "";
+        if (scope && strcmp(scope, "-") == 0) scope = "";
+        if (perapp_save(pkg, mode, scope) == 0) { g_reload = 1; ctl_reply(c, "OK\n"); }
+        else ctl_reply(c, "ERR write\n");
+        return;
+    }
+    if (!strncmp(cmd, "GETPERPROC ", 11)) {
+        char *proc = trim(cmd + 11);
+        perproc_t *e = perproc_lookup(proc);
+        char b[512];
+        if (e) snprintf(b, sizeof(b), "OK %s\n", e->mode);
+        else   snprintf(b, sizeof(b), "OK -\n");
+        ctl_reply(c, b);
+        return;
+    }
+    if (!strncmp(cmd, "SETPERPROC ", 11)) {
+        /* SETPERPROC <procname> <mode|-> */
+        char *p2 = cmd + 11;
+        char *sp1 = strchr(p2, ' ');
+        if (!sp1) { ctl_reply(c, "ERR usage\n"); return; }
+        *sp1 = '\0';
+        char *proc = trim(p2);
+        char *mode = trim(sp1 + 1);
+        if (strcmp(mode, "-") == 0) mode = "";
+        if (perproc_save(proc, mode) == 0) { g_reload = 1; ctl_reply(c, "OK\n"); }
+        else ctl_reply(c, "ERR write\n");
+        return;
+    }
     if (!strncmp(cmd, "KILLPKG ", 8)) {
-        char *pkg = trim(cmd + 8);
+        char *p = cmd + 8;
+        char *sp2 = strchr(p, ' ');
+        char *kmode = NULL;
+        if (sp2) { *sp2 = '\0'; kmode = trim(sp2 + 1); }
+        char *pkg = trim(p);
+        const char *km = (kmode && *kmode) ? kmode : g_cfg.kill_mode;
         char pids[512];
         int cnt = 0;
-        int ok = kill_package(pkg, g_cfg.kill_scope, g_cfg.kill_mode, 0, &cnt, pids, sizeof(pids));
+        int ok = kill_package(pkg, g_cfg.kill_scope, km, 0, &cnt, pids, sizeof(pids));
         char b[700];
         snprintf(b, sizeof(b), "OK %d %s %s\n", cnt, ok ? "hit" : "miss", pids);
         ctl_reply(c, b);
@@ -1346,6 +1625,8 @@ static int run_daemon(void) {
     blacklist_load(g_moddir);
     system_list_load(g_moddir);
     immortal_load(g_moddir);
+    perapp_load(g_moddir);
+    perproc_load(g_moddir);
     ime_load();
     ensure_dirs();
     log_open();
@@ -1379,10 +1660,13 @@ static int run_daemon(void) {
             blacklist_load(g_moddir);
             system_list_load(g_moddir);
             immortal_load(g_moddir);
+            perapp_load(g_moddir);
+            perproc_load(g_moddir);
             ime_load();
-            log_msg("reload config: timeout=%ds interval=%dms mode=%s scope=%s dry_run=%d protect=%d black=%d system=%d immortal=%d ime=%s",
+            log_msg("reload config: timeout=%ds interval=%dms mode=%s scope=%s dry_run=%d protect=%d black=%d system=%d immortal=%d perapp=%d perproc=%d ime=%s",
                     g_cfg.timeout_sec, g_cfg.interval_ms, g_cfg.kill_mode, g_cfg.kill_scope,
-                    g_cfg.dry_run, g_protect_n, g_blacklist_n, g_systemlist_n, g_immortal_n, g_ime_pkg);
+                    g_cfg.dry_run, g_protect_n, g_blacklist_n, g_systemlist_n, g_immortal_n,
+                    g_perapp_n, g_perproc_n, g_ime_pkg);
         }
 
         if (g_cfg.enable) {

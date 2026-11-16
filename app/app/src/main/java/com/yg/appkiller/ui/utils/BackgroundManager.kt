@@ -16,7 +16,7 @@ object BackgroundManager {
     // --- 非 blur 模式（仅降 alpha）---
     const val topAppBarAlpha = 0.55f
     const val cardAlpha = 0.55f
-    const val forceSmallTop = false
+    const val forceSmallTop = true
 
     // --- blur 模式（毛玻璃效果）---
     const val cardAlphaBlurred = 0.35f

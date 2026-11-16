@@ -1,5 +1,11 @@
 @file:OptIn(ExperimentalScrollBarApi::class)
 package com.yg.appkiller
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.add
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.only
 
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -79,6 +85,8 @@ fun SettingsPage() {
 
     Scaffold(
         containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout)
+            .only(WindowInsetsSides.Horizontal),
         topBar = {
             BlurredBar(backdrop, blurActive, scrollBehavior) {
                 AdaptiveTopAppBar(

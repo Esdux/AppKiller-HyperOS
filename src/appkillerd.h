@@ -20,6 +20,8 @@
 #define MAX_PKGS        768
 #define MAX_PROTECT    1024
 #define MAX_HISTORY      32
+#define MAX_PERAPP       256
+#define MAX_PERPROC      512
 #define MAX_LINE        512
 #define PKG_LEN          96
 #define PATH_LEN        320
@@ -48,6 +50,8 @@ typedef struct {
     char immortal_file[PATH_LEN];    /* persistent 应用清单：系统会自拉起，不清理 */
     char system_default[SMALL_LEN];
     char user_default[SMALL_LEN];
+    char perapp_file[PATH_LEN];
+    char perproc_file[PATH_LEN];
 } config_t;
 
 /* 单个包的观测结果 */
@@ -71,6 +75,19 @@ typedef struct {
     int       ok;
 } hist_t;
 
+/* 每应用覆盖配置：清理方式 + 清理范围 */
+typedef struct {
+    char pkg[PKG_LEN];
+    char mode[SMALL_LEN];   /* sigkill | am_kill | force_stop */
+    char scope[SMALL_LEN];  /* pkg | frozen */
+} perapp_t;
+
+/* 每进程覆盖配置：按进程名（cmdline）匹配 */
+typedef struct {
+    char proc[PKG_LEN];     /* 完整进程名，如 com.tencent.mm:push */
+    char mode[SMALL_LEN];   /* sigkill | skip */
+} perproc_t;
+
 extern config_t g_cfg;
 extern char     g_moddir[PATH_LEN];
 
@@ -89,6 +106,12 @@ int  system_list_load(const char *moddir);
 int  immortal_load(const char *moddir);
 int  pkg_should_manage(const char *pkg);
 int  pkg_is_hard_protected(const char *pkg);
+int  perapp_load(const char *moddir);
+int  perproc_load(const char *moddir);
+perapp_t  *perapp_lookup(const char *pkg);
+perproc_t *perproc_lookup(const char *procname);
+int  perapp_save(const char *pkg, const char *mode, const char *scope);
+int  perproc_save(const char *procname, const char *mode);
 
 /* ---- /proc 读取 ---- */
 long long mono_sec(void);

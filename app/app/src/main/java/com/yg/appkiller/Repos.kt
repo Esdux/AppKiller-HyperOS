@@ -291,6 +291,12 @@ object ModuleRepo {
         }
     }
 
+    fun restartDaemon() {
+        if (Shell.rootOk()) {
+            Shell.sh("kill \$(cat " + MODDIR + "/run/appkillerd.pid 2>/dev/null) 2>/dev/null; sleep 1; mkdir -p " + MODDIR + "/logs " + MODDIR + "/run; nohup " + MODDIR + "/bin/appkillerd daemon -m " + MODDIR + " >> " + MODDIR + "/logs/stdout.log 2>&1 &", 8000)
+        }
+    }
+
     fun stopDaemon() {
         if (Shell.rootOk()) {
             Shell.sh("kill \$(cat " + MODDIR + "/run/appkillerd.pid 2>/dev/null) 2>/dev/null", 5000)

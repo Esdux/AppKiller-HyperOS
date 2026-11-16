@@ -1,5 +1,11 @@
 @file:OptIn(ExperimentalScrollBarApi::class)
 package com.yg.appkiller
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.add
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.only
 
 import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
@@ -84,6 +90,8 @@ fun StatusPage(callback: (Int) -> Unit = {}) {
 
     Scaffold(
         containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout)
+            .only(WindowInsetsSides.Horizontal),
         topBar = {
             BlurredBar(backdrop, blurActive, topAppBarScrollBehavior) {
                 AdaptiveTopAppBar(
@@ -408,6 +416,8 @@ private fun InfoCard(
     modifier: Modifier = Modifier,
     colors: CardColors = CardDefaults.defaultColors(),
 ) {
+    val restartScope = rememberCoroutineScope()
+
     @Composable
     fun InfoText(title: String, content: String, bottomPadding: Dp = 24.dp, m: Modifier = Modifier) {
         Text(
@@ -443,11 +453,22 @@ private fun InfoCard(
                 content = if (running) "运行中" else "已停止",
                 bottomPadding = 8.dp,
             )
-            TextButton(
-                modifier = Modifier.fillMaxWidth(),
-                text = if (running) "停止守护进程" else "启动守护进程",
-                onClick = onToggle,
-            )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                TextButton(
+                    modifier = Modifier.weight(1f),
+                    text = if (running) "停止守护进程" else "启动守护进程",
+                    onClick = onToggle,
+                )
+                TextButton(
+                    modifier = Modifier.weight(1f),
+                    text = "重启守护进程",
+                    onClick = {
+                        restartScope.launch {
+                            withContext(Dispatchers.IO) { ModuleRepo.restartDaemon() }
+                        }
+                    },
+                )
+            }
         }
     }
 }

@@ -1,7 +1,16 @@
 @file:OptIn(ExperimentalScrollBarApi::class)
 package com.yg.appkiller
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.add
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.only
 
+import android.content.Intent
+import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -26,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,6 +66,7 @@ import com.yg.appkiller.ui.utils.pageScrollModifiers
 import com.yg.appkiller.ui.utils.rememberBlurBackdrop
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.InputField
@@ -94,6 +105,9 @@ fun RunningPage() {
     var cfg by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var tick by remember { mutableIntStateOf(0) }
     var hasLoadedOnce by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var armedPkg by remember { mutableStateOf("") }
+    var armedAt by remember { mutableStateOf(0L) }
     val keyboardController = LocalSoftwareKeyboardController.current
 
     LaunchedEffect(tick) {
@@ -107,7 +121,7 @@ fun RunningPage() {
     LaunchedEffect(Unit) {
         labels = withContext(Dispatchers.IO) { AppRepo.labelMap(ctx) }
         while (true) {
-            delay(1500)
+            delay(1000)
             tick++
         }
     }
@@ -125,6 +139,8 @@ fun RunningPage() {
 
     Scaffold(
         containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout)
+            .only(WindowInsetsSides.Horizontal),
         topBar = {
             BlurredBar(backdrop, blurActive, scrollBehavior) {
                 AdaptiveTopAppBar(
@@ -224,8 +240,31 @@ fun RunningPage() {
                             items = filteredApps,
                             key = { _, item -> item.pkg },
                         ) { i, item ->
+                            val itemLabel = labels[item.pkg] ?: item.pkg.substringAfterLast('.')
+                            val onTap: () -> Unit = {
+                                val now = System.currentTimeMillis()
+                                if (armedPkg == item.pkg && now - armedAt < 3000L) {
+                                    armedPkg = ""
+                                    scope.launch {
+                                        val r = withContext(Dispatchers.IO) { Ctrl.killPkg(item.pkg, "force_stop") }
+                                        Toast.makeText(ctx, "已清理 " + itemLabel + "：" + r.trim(), Toast.LENGTH_SHORT).show()
+                                    }
+                                    tick++
+                                } else {
+                                    armedPkg = item.pkg
+                                    armedAt = now
+                                    Toast.makeText(ctx, "再次点击将杀死 " + itemLabel, Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            val onLong: () -> Unit = {
+                                ctx.startActivity(
+                                    Intent(ctx, AppDetailActivity::class.java)
+                                        .putExtra("pkg", item.pkg)
+                                        .putExtra("label", itemLabel)
+                                )
+                            }
                             val content: @Composable () -> Unit = {
-                                FrozenAppItem(item, labels[item.pkg] ?: item.pkg.substringAfterLast('.'), timeoutSec)
+                                FrozenAppItem(item, itemLabel, timeoutSec, onTap, onLong)
                             }
                             if (appCount == 1) {
                                 CirnoCard(modifier = Modifier.padding(horizontal = 12.dp)) {
@@ -278,8 +317,15 @@ fun RunningPage() {
 }
 
 /** 与 Cirno FrozenAppItemCompose 同构的行：图标 + 名称 + 进程/冻结注记 + 右侧剩余与已冻结。 */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FrozenAppItem(app: FrozenApp, label: String, timeoutSec: Long) {
+private fun FrozenAppItem(
+    app: FrozenApp,
+    label: String,
+    timeoutSec: Long,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
     val subtitleColor = colorScheme.onSurfaceVariantSummary
     val progress = if (timeoutSec > 0) {
         (app.frozenSec.toFloat() / timeoutSec * 100f).coerceIn(0f, 100f)
@@ -298,14 +344,14 @@ private fun FrozenAppItem(app: FrozenApp, label: String, timeoutSec: Long) {
     }
 
     CustomBasicComponent(
+        modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
         title = label,
         subtitleAnnotated = subtitleText,
         rightText = String.format(java.util.Locale.ROOT, "%.2f%%", progress),
         rightTextColor = colorScheme.onSurfaceVariantSummary,
         leftAction = {
-            Box(modifier = Modifier.size(64.dp).padding(end = 16.dp)) {
-                AppIcon(pkg = app.pkg, label = label, size = 48.dp)
-            }
+            AppIcon(pkg = app.pkg, label = label, size = 46.dp)
+            Spacer(Modifier.size(16.dp))
         },
         rightActions = {
             Text(

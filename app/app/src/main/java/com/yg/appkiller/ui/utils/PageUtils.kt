@@ -1,4 +1,8 @@
 package com.yg.appkiller.ui.utils
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import top.yukonga.miuix.kmp.blur.ProgressiveBlur
+import top.yukonga.miuix.kmp.blur.progressiveTextureBlur
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -95,30 +99,16 @@ fun AdaptiveTopAppBar(
         color
     }
 
-    if (isWideScreen || BackgroundManager.forceSmallTop) {
-        SmallTopAppBar(
-            title = title,
-            subtitle = subtitle,
-            color = barColor,
-            scrollBehavior = scrollBehavior,
-            defaultWindowInsetsPadding = false,
-            navigationIcon = navigationIcon,
-            actions = actions,
-            bottomContent = bottomContent,
-        )
-    } else {
-        TopAppBar(
-            title = title,
-            subtitle = subtitle,
-            color = barColor,
-            scrollBehavior = scrollBehavior,
-            navigationIcon = navigationIcon,
-            actions = actions,
-            bottomContent = bottomContent,
-        )
-    }
+    SmallTopAppBar(
+        title = title,
+        subtitle = subtitle,
+        color = barColor,
+        scrollBehavior = scrollBehavior,
+        navigationIcon = navigationIcon,
+        actions = actions,
+        bottomContent = bottomContent,
+    )
 }
-
 @Composable
 fun rememberBlurBackdrop(blurEnabled: Boolean = true, replaceBlurChecker: Boolean = false): LayerBackdrop? {
     if (!replaceBlurChecker) {
@@ -130,9 +120,17 @@ fun rememberBlurBackdrop(blurEnabled: Boolean = true, replaceBlurChecker: Boolea
     val surfaceColor = MiuixTheme.colorScheme.surface
 
     return rememberLayerBackdrop {
-        drawContent()
         drawRect(surfaceColor)
+        drawContent()
     }
+}
+
+/** 顶栏渐进模糊参数（抄自 vcut BlurUtils.TopBarBlurConfig） */
+object TopBarBlurConfig {
+    const val BlurRadius: Float = 15f
+    const val GradientCurve: Float = 10f
+    const val SurfaceAlpha: Float = 0.3f
+    val ScrollFadeDistance: Dp = 0.dp
 }
 
 @Composable
@@ -142,36 +140,35 @@ fun BlurredBar(
     scrollBehavior: ScrollBehavior? = null,
     content: @Composable () -> Unit,
 ) {
-    val imageBackdrop = LocalImageBackdrop.current
-    val useImageBlur = imageBackdrop != null && blurEnabled
-    val effectiveBackdrop = if (useImageBlur) imageBackdrop else backdrop
-    val collapsedFraction = scrollBehavior?.state?.collapsedFraction ?: 1f
-
-    val blurRadius = if (useImageBlur) {
-        BackgroundManager.topAppBarBlurRadius
-    } else 45f
-
-    val blendAlpha = if (useImageBlur) {
-        BackgroundManager.topAppBarBlurAlpha * collapsedFraction.coerceAtLeast(0.15f)
-    } else {
-        collapsedFraction * 0.8f
-    }
-
-    Box(
-        modifier = if (blurEnabled && effectiveBackdrop != null) {
-            Modifier.textureBlur(
-                backdrop = effectiveBackdrop,
-                blurRadius = blurRadius,
-                colors = BlurColors(
-                    blendColors = listOf(
-                        BlendColorEntry(color = MiuixTheme.colorScheme.surface.copy(blendAlpha)),
+    val blurActive = blurEnabled && backdrop != null
+    val scrollFadePx = with(LocalDensity.current) { TopBarBlurConfig.ScrollFadeDistance.toPx() }
+    Box {
+        if (blurActive) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .graphicsLayer {
+                        alpha = if (scrollFadePx > 0f) {
+                            scrollBehavior?.state
+                                ?.let { (-it.contentOffset / scrollFadePx).coerceIn(0f, 1f) }
+                                ?: 1f
+                        } else {
+                            1f
+                        }
+                    }
+                    .progressiveTextureBlur(
+                        backdrop = backdrop,
+                        shape = RectangleShape,
+                        gradient = ProgressiveBlur.Top.copy(curve = TopBarBlurConfig.GradientCurve),
+                        blurRadius = TopBarBlurConfig.BlurRadius,
+                        colors = BlurColors(
+                            blendColors = listOf(
+                                BlendColorEntry(color = MiuixTheme.colorScheme.surface.copy(TopBarBlurConfig.SurfaceAlpha)),
+                            ),
+                        ),
                     ),
-                )
             )
-        } else {
-            Modifier
-        },
-    ) {
+        }
         content()
     }
 }

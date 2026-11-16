@@ -1,6 +1,12 @@
 @file:OptIn(ExperimentalScrollBarApi::class)
 package com.yg.appkiller
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.add
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.only
 
+import android.content.Intent
 import android.os.PowerManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -211,6 +217,8 @@ fun AppListPage() {
 
     Scaffold(
         containerColor = Color.Transparent,
+        contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout)
+            .only(WindowInsetsSides.Horizontal),
         topBar = {
             BlurredBar(backdrop, blurActive, scrollBehavior) {
                 AdaptiveTopAppBar(
@@ -340,37 +348,7 @@ fun AppListPage() {
                                             color = colorScheme.onSurfaceVariantSummary,
                                             modifier = Modifier.weight(1f),
                                         )
-                                        if (dirty) {
-                                            Text(
-                                                text = "保存",
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = colorScheme.primary,
-                                                modifier = Modifier
-                                                    .clickable {
-                                                        scope.launch {
-                                                            saving = true
-                                                            withContext(Dispatchers.IO) {
-                                                                ModuleRepo.writeList(
-                                                                    "protect.list",
-                                                                    "# 保护名单：命中的包永不被清理（前缀 * 匹配，# 为注释）",
-                                                                    white,
-                                                                )
-                                                                ModuleRepo.writeList(
-                                                                    "blacklist.list",
-                                                                    "# 黑名单：命中的包即使被冻结也会被清理（优先级高于白名单）",
-                                                                    black,
-                                                                )
-                                                                ModuleRepo.reload()
-                                                            }
-                                                            saving = false
-                                                            dirty = false
-                                                            notice = "已保存并重载"
-                                                        }
-                                                    }
-                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                                            )
-                                        }
+
                                     }
                                 }
 
@@ -384,10 +362,11 @@ fun AppListPage() {
                                     val configured = inWhite || inBlack
                                     val onTap = {
                                         hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
-                                        white = if (inWhite) white - item.pkg else white + item.pkg
-                                        black = if (inWhite) black + item.pkg else black - item.pkg
-                                        dirty = true
-                                        notice = ""
+                                        ctx.startActivity(
+                                            Intent(ctx, AppDetailActivity::class.java)
+                                                .putExtra("pkg", item.pkg)
+                                                .putExtra("label", item.label)
+                                        )
                                     }
                                     val content: @Composable () -> Unit = {
                                         CustomBasicComponent(
