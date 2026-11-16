@@ -17,6 +17,10 @@ if [ -f "$OLD/protect.list" ]; then
     ui_print "- 保留已有 protect.list"
     cp -f "$OLD/protect.list" "$MODPATH/protect.list"
 fi
+if [ -f "$OLD/blacklist.list" ]; then
+    ui_print "- 保留已有 blacklist.list"
+    cp -f "$OLD/blacklist.list" "$MODPATH/blacklist.list"
+fi
 
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/bin/appkillerd" 0 0 0755
