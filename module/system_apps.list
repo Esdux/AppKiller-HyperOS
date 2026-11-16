@@ -1,0 +1,3 @@
+# 系统应用清单：由管理器 App 或用例脚本自动生成
+# 生成命令：pm list packages -s | cut -d: -f2
+# 该文件为空时 daemon 会自己跑一次 pm list packages -s 兜底

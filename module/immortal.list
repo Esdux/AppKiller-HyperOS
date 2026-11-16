@@ -1,0 +1,2 @@
+# persistent 应用清单：android:persistent=true 的常驻应用，杀了会被系统立刻拉起
+# 由管理器 App 生成；为空时不影响判定
