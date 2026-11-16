@@ -158,6 +158,108 @@ object ModuleRepo {
         Shell.sh("printf '%s' '" + b64 + "' | base64 -d > " + MODDIR + "/" + rel, 12000)
     }
 
+    /** 备份用：一次 su 读全部配置与名单文件 */
+    fun exportAll(): Map<String, String> {
+        if (!Shell.rootOk()) return emptyMap()
+        val names = listOf("config.conf", "protect.list", "blacklist.list", "system_apps.list", "immortal.list")
+        val sb = StringBuilder("cd ").append(MODDIR).append(" 2>/dev/null || { echo '===MISSING==='; exit 0; }; ")
+        for (n in names) sb.append("echo '===").append(n).append("==='; cat '").append(n).append("' 2>/dev/null; ")
+        val raw = Shell.sh(sb.toString(), 12000)
+        if (raw.isBlank() || raw.contains("===MISSING===")) return emptyMap()
+        val map = LinkedHashMap<String, String>()
+        var cur: String? = null
+        val acc = StringBuilder()
+        for (line in raw.lines()) {
+            if (line.startsWith("===") && line.endsWith("===") && line.length > 6) {
+                if (cur != null) map[cur] = acc.toString()
+                cur = line.substring(3, line.length - 3)
+                acc.setLength(0)
+            } else if (cur != null) acc.append(line).append('\n')
+        }
+        if (cur != null) map[cur] = acc.toString()
+        return map
+    }
+
+    /** 备份文本格式：与 exportAll 相同的 ===文件名=== 分节 */
+    fun toBackupText(map: Map<String, String>): String {
+        val sb = StringBuilder("# AppKiller 备份 v1\n")
+        for ((k, v) in map) sb.append("===").append(k).append("===\n").append(v)
+        return sb.toString()
+    }
+
+    fun parseBackupText(text: String): Map<String, String> {
+        val map = LinkedHashMap<String, String>()
+        var cur: String? = null
+        val acc = StringBuilder()
+        for (line in text.lines()) {
+            if (line.startsWith("===") && line.endsWith("===") && line.length > 6) {
+                if (cur != null) map[cur] = acc.toString()
+                cur = line.substring(3, line.length - 3)
+                acc.setLength(0)
+            } else if (cur != null) acc.append(line).append('\n')
+        }
+        if (cur != null) map[cur] = acc.toString()
+        return map
+    }
+
+    /** 还原备份：逐文件写回并重载；返回写入的文件数 */
+    fun importAll(text: String): Int {
+        val map = parseBackupText(text)
+        if (map.isEmpty() || !Shell.rootOk()) return 0
+        var n = 0
+        for ((k, v) in map) {
+            if (k !in listOf("config.conf", "protect.list", "blacklist.list", "system_apps.list", "immortal.list")) continue
+            writeFileRaw(k, v)
+            n++
+        }
+        if (n > 0) reload()
+        return n
+    }
+
+    /**
+     * 导入 Cirno 的 ApplicationSettings.json：把 whiteApps 并入白名单、blackApps 并入黑名单。
+     * 返回 "新增白/新增黑" 两个数字。
+     */
+    fun importCirnoLists(json: String): Pair<Int, Int> {
+        if (!Shell.rootOk()) return 0 to 0
+        val obj = try { org.json.JSONObject(json) } catch (e: Exception) { return 0 to 0 }
+        fun arr(name: String): List<String> {
+            val ja = obj.optJSONArray(name) ?: return emptyList()
+            val out = ArrayList<String>(ja.length())
+            for (i in 0 until ja.length()) {
+                val s = ja.optString(i, "").trim()
+                if (s.isNotEmpty()) out.add(s)
+            }
+            return out
+        }
+        val white = arr("whiteApps")
+        val black = arr("blackApps")
+        var addW = 0
+        var addB = 0
+        if (white.isNotEmpty()) {
+            val cur = list("protect.list").toMutableSet()
+            val before = cur.size
+            cur.addAll(white)
+            addW = cur.size - before
+            if (addW > 0) writeListNoReload("protect.list", "# 白名单（含 Cirno 导入）", cur)
+        }
+        if (black.isNotEmpty()) {
+            val cur = list("blacklist.list").toMutableSet()
+            val before = cur.size
+            cur.addAll(black)
+            addB = cur.size - before
+            if (addB > 0) writeListNoReload("blacklist.list", "# 黑名单（含 Cirno 导入）", cur)
+        }
+        if (addW > 0 || addB > 0) reload()
+        return addW to addB
+    }
+
+    private fun writeListNoReload(name: String, header: String, items: Collection<String>) {
+        val sb = StringBuilder(header).append('\n')
+        items.sorted().forEach { sb.append(it).append('\n') }
+        writeFileRaw(name, sb.toString())
+    }
+
     fun reload(): Boolean {
         if (Shell.rootOk()) {
             Shell.sh("kill -HUP \$(cat $MODDIR/run/appkillerd.pid 2>/dev/null) 2>/dev/null", 4000)
@@ -199,6 +301,13 @@ data class FrozenApp(
     val totalProcs: Int,
     val killedTimes: Int,
     val managed: Boolean,
+)
+
+/** 守护进程 STATUS 报文的一次快照。 */
+data class StatusSnapshot(
+    val uptimeSec: Long = 0,
+    val apps: List<FrozenApp> = emptyList(),
+    val pid: Int = 0,
 )
 
 object StateRepo {
@@ -285,10 +394,11 @@ object AppRepo {
     }
 
     fun labelMap(ctx: Context): Map<String, String> {
-        val pm = ctx.packageManager
+        // 与 installed() 同路：HyperOS 4 的 getInstalledApplications 只返回本应用，
+        // 直接用它做映射会让运行列表只剩包名尾巴。
         val m = HashMap<String, String>()
-        for (ai in pm.getInstalledApplications(0)) {
-            m[ai.packageName] = pm.getApplicationLabel(ai).toString()
+        for (e in installed(ctx)) {
+            m[e.pkg] = e.label
         }
         return m
     }

@@ -55,6 +55,7 @@ dependencies {
     implementation("androidx.navigation3:navigation3-runtime:1.1.4")
     implementation("androidx.navigationevent:navigationevent-compose:1.1.2")
     implementation("io.github.kyant0:backdrop:1.0.6")
+    implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material3:material3-window-size-class")
 }

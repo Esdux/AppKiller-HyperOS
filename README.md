@@ -71,7 +71,7 @@ appkiller-hyperos/
 
 ## 管理器 App
 
-界面层**直接搬自 [Cirno](https://github.com/Adkimsm/Cirno) 的 Compose 壳**（横向分页 + 浮动胶囊底栏 + CirnoCard + 壁纸模糊），
+界面层**直接搬自 [Cirno](https://github.com/Adkimsm/Cirno) 的 Compose 壳**（横向分页 + CirnoCard + 壁纸模糊），底栏用 [VCut Lower](https://github.com/zyl6932/vcut) 同源的**液态玻璃悬浮导航栏**（`IosLiquidGlassNavigationBar`：胶囊容器 + 折射透镜 + 可拖拽指示器，HyperNavBar / Kyant0 AndroidLiquidGlass 一脉，Apache-2.0），
 组件来自 [Miuix](https://github.com/compose-miuix-ui/miuix) 0.9.4 与 [kyant0/backdrop](https://github.com/Kyant0/backdrop)。
 这套壳已抽成通用框架放在 `tools/compose-cirno-shell/`，可整套复制到别的 Compose 工程。
 
@@ -91,12 +91,13 @@ appkiller-hyperos/
 | 位置 | 说明 |
 | --- | --- |
 | `MainActivity.kt` | 入口：`AppRoot` → 主题 → `AppState` → `MiuixBackground` → `AppContent` |
-| `ui/app/AppContent.kt` | 壳：`HorizontalPager` + `FloatingBottomBar`（4 个 tab，图标 + 文字，可拖拽切页） |
+| `ui/app/AppContent.kt` | 壳：`HorizontalPager` + `IosLiquidGlassNavigationBar`（4 个 tab，图标 + 文字，指示器可拖拽切页） |
+| `ui/custom/liquid/*` | 液态玻璃底栏五件：`LiquidGlassNavigationBar` + `Vibrancy` / `Lens` / `InnerShadow` / `CombinedBackdrop` |
 | `ui/app/AppState.kt` / `Theme.kt` | 全局界面状态（模糊、分页滑动、回弹、圆角）与 Miuix 主题控制 |
 | `ui/PageKit.kt` | `CirnoPage`：`AdaptiveTopAppBar` + `LazyColumn` + 给浮动底栏预留的 150dp 底部留白 |
 | `ui/utils/*` | `PageUtils`（滚动修饰/顶栏/纹理模糊）、`CirnoCard`、`BackgroundManager`（壁纸）、`MiuixBackground` |
 | `ui/custom/*` | `FloatingBottomBar`、`DampedDragAnimation`、`InteractiveHighlight`（AGSL 高光）、`DragGestureInspector` |
-| `StatusPage` / `RunningPage` / `AppListPage` / `SettingsPage` | 四页业务内容 |
+| `StatusPage` / `RunningPage` / `AppListPage` / `SettingsPage` | 四页业务内容；设置页含「配置备份」组：导出配置 / 导入配置 / 导入 Cirno 白名单（读 Cirno 的 `ApplicationSettings.json`，把 `whiteApps` / `blackApps` 并入本模块名单） |
 
 minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求），页面底部统一留 150dp 给浮动底栏。
 

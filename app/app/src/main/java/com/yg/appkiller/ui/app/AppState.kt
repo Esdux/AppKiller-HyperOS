@@ -27,3 +27,6 @@ val LocalAppState = compositionLocalOf<AppState> {
 val LocalUpdateAppState = staticCompositionLocalOf<((AppState) -> AppState) -> Unit> {
     error("No AppState updater provided!")
 }
+
+/** 是否宽屏（平板/折叠展开）：与 Cirno 的 LocalIsWideScreen 同义。 */
+val LocalIsWideScreen = compositionLocalOf { false }
