@@ -167,6 +167,8 @@ export MIUIX_REPO=/path/to/android-compose-libs
 - 只处理「已冻结」的应用；系统压根不冻的常驻进程不在范围内（那属于保活治理）
 - Cirno 的运行时豁免（播放音频、定位、录音、相机、悬浮窗、VPN、网速、无障碍、自动填充、通行密钥、等待推送响应）依赖 hook，本模块只能覆盖「前台可见 + 输入法 + persistent + 系统应用」这几类
 - `force_stop` 模式下被强停的应用无法自拉起，依赖推送的应用可能收不到消息
+- 管理器 App 的 minSdk 为 33（`miuix-blur-android:0.9.4` 的 manifest 要求），Android 12 及以下装不上；守护进程本身不受影响，低版本系统仍可用模块脚本 + WebUI
+- 界面模糊依赖 AGSL `RuntimeShader`，设备不支持时会自动降级为纯色卡片（功能不变）
 - 硬保护名单内的包即使用户拉黑也不会被处理
 
 ## 许可
