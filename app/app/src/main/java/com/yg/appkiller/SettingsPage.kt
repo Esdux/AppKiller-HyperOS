@@ -4,6 +4,7 @@ package com.yg.appkiller
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -122,8 +124,6 @@ private fun SettingsContent(
     var maxPerRound by remember { mutableFloatStateOf(3f) }
     var cooldown by remember { mutableFloatStateOf(180f) }
     var loaded by remember { mutableStateOf(false) }
-    var showLog by remember { mutableStateOf(false) }
-    var log by remember { mutableStateOf("") }
     var backupMsg by remember { mutableStateOf("") }
 
     val killModeItems = listOf("SIGKILL", "am kill", "强制停止")
@@ -189,23 +189,6 @@ private fun SettingsContent(
                 if (!text.startsWith("# AppKiller 备份")) return@withContext "导入失败：不是 AppKiller 备份文件"
                 val n = ModuleRepo.importAll(text)
                 if (n > 0) "已还原 " + n + " 个文件并重载" else "导入失败：没有可还原的文件"
-            }
-        }
-    }
-
-    val cirnoLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument(),
-    ) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            backupMsg = withContext(Dispatchers.IO) {
-                val text = runCatching {
-                    ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
-                }.getOrNull()
-                if (text.isNullOrBlank()) return@withContext "导入失败：读不到文件内容"
-                val (w, b) = ModuleRepo.importCirnoLists(text)
-                if (w == 0 && b == 0) "没有新增条目（文件不是 Cirno 的 ApplicationSettings.json，或名单已包含）"
-                else "Cirno 名单导入完成：白名单 +" + w + "、黑名单 +" + b
             }
         }
     }
@@ -343,8 +326,8 @@ private fun SettingsContent(
                         onSelectedIndexChange = { updateAppState { s -> s.copy(colorMode = it) } },
                     )
                     SwitchPreference(
-                        title = "液态玻璃导航栏",
-                        summary = "关闭后回退为普通胶囊底栏",
+                        title = "液态玻璃效果",
+                        summary = "悬浮导航栏的玻璃质感（折射 / 高光 / 透镜）；关闭后为纯色胶囊",
                         checked = appState.liquidGlass,
                         onCheckedChange = { on ->
                             UiPrefs.setLiquidGlass(ctx, on)
@@ -352,8 +335,8 @@ private fun SettingsContent(
                         },
                     )
                     SwitchPreference(
-                        title = "模糊效果",
-                        summary = "卡片与顶栏毛玻璃",
+                        title = "背景模糊",
+                        summary = "页面内容接入毛玻璃背景",
                         checked = appState.blur,
                         onCheckedChange = { on -> updateAppState { s -> s.copy(blur = on) } },
                     )
@@ -390,9 +373,10 @@ private fun SettingsContent(
                         title = "查看守护日志",
                         summary = "读取 daemon.log 最后 60 行",
                         onClick = {
-                            showLog = true
+                            DialogHost.logText = ""
+                            DialogHost.logShow = true
                             scope.launch {
-                                log = withContext(Dispatchers.IO) { ModuleRepo.logTail(60) }
+                                DialogHost.logText = withContext(Dispatchers.IO) { ModuleRepo.logTail(60) }
                             }
                         },
                     )
@@ -413,9 +397,28 @@ private fun SettingsContent(
                         onClick = { importLauncher.launch(arrayOf("text/plain", "*/*")) },
                     )
                     ArrowPreference(
-                        title = "导入 Cirno 白名单",
-                        summary = "读取 Cirno 的 ApplicationSettings.json，把 whiteApps / blackApps 并入本模块名单",
-                        onClick = { cirnoLauncher.launch(arrayOf("application/json", "*/*")) },
+                        title = "导入 Cirno 名单",
+                        summary = "直接读取设备上 Cirno 的配置，勾选要导入的条目，可选合并或覆盖",
+                        onClick = {
+                            DialogHost.cirnoLoading = true
+                            DialogHost.cirnoTab = 0
+                            DialogHost.cirnoShow = true
+                            scope.launch {
+                                val json = withContext(Dispatchers.IO) { ModuleRepo.readCirnoConfig() }
+                                if (json == null) {
+                                    backupMsg = "未找到 Cirno 配置（/data/system/Cirno/ApplicationSettings.json）"
+                                    DialogHost.cirnoShow = false
+                                    DialogHost.cirnoLoading = false
+                                    return@launch
+                                }
+                                val (w, b) = ModuleRepo.parseCirnoApps(json)
+                                DialogHost.cirnoWhite = w
+                                DialogHost.cirnoBlack = b
+                                DialogHost.cirnoSelW = w.toSet()
+                                DialogHost.cirnoSelB = b.toSet()
+                                DialogHost.cirnoLoading = false
+                            }
+                        },
                     )
                     if (backupMsg.isNotEmpty()) {
                         Text(
@@ -442,28 +445,4 @@ private fun SettingsContent(
         }
     }
 
-    OverlayDialog(
-        title = "daemon.log（尾部）",
-        show = showLog,
-        onDismissRequest = { showLog = false },
-    ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = log.ifEmpty { "读取中…" },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(260.dp)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 4.dp),
-                fontSize = 11.sp,
-                color = colorScheme.onSurfaceVariantSummary,
-            )
-            TextButton(
-                modifier = Modifier.fillMaxWidth(),
-                text = "确定",
-                colors = ButtonDefaults.textButtonColorsPrimary(),
-                onClick = { showLog = false },
-            )
-        }
-    }
 }

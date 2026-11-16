@@ -50,9 +50,17 @@ object ModuleRepo {
 
     private val FILE_NAMES = listOf("run/state.json", "config.conf", "protect.list", "blacklist.list", "system_apps.list")
 
+    /** bundle 短缓存：同一轮界面刷新里 running/configMap/list 多次调用只 fork 一次 su */
+    private const val BUNDLE_TTL_MS = 2000L
+    @Volatile private var bundleCache: Pair<Long, Map<String, String>>? = null
+
+    fun invalidateBundle() { bundleCache = null }
+
     /** 一次 su 读完状态 + 配置 + 三份名单，避免多次 fork su */
     fun readBundle(): Map<String, String> {
         if (!Shell.rootOk()) return emptyMap()
+        val c = bundleCache
+        if (c != null && System.currentTimeMillis() - c.first < BUNDLE_TTL_MS) return c.second
         val sb = StringBuilder()
         sb.append("cd ").append(MODDIR).append(" 2>/dev/null || { echo '===MISSING==='; exit 0; }; ")
         for (n in FILE_NAMES) {
@@ -73,6 +81,7 @@ object ModuleRepo {
             }
         }
         if (cur != null) map[cur] = acc.toString()
+        bundleCache = System.currentTimeMillis() to map
         return map
     }
 
@@ -156,6 +165,7 @@ object ModuleRepo {
     fun writeFileRaw(rel: String, content: String) {
         val b64 = Base64.encodeToString(content.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         Shell.sh("printf '%s' '" + b64 + "' | base64 -d > " + MODDIR + "/" + rel, 12000)
+        invalidateBundle()
     }
 
     /** 备份用：一次 su 读全部配置与名单文件 */
@@ -216,42 +226,44 @@ object ModuleRepo {
         return n
     }
 
-    /**
-     * 导入 Cirno 的 ApplicationSettings.json：把 whiteApps 并入白名单、blackApps 并入黑名单。
-     * 返回 "新增白/新增黑" 两个数字。
-     */
-    fun importCirnoLists(json: String): Pair<Int, Int> {
-        if (!Shell.rootOk()) return 0 to 0
-        val obj = try { org.json.JSONObject(json) } catch (e: Exception) { return 0 to 0 }
+    /** 直接读设备上的 Cirno 配置；未安装 / 无配置返回 null */
+    fun readCirnoConfig(): String? {
+        if (!Shell.rootOk()) return null
+        val raw = Shell.sh("cat /data/system/Cirno/ApplicationSettings.json 2>/dev/null", 8000)
+        return raw.ifBlank { null }
+    }
+
+    /** 解析 Cirno 配置的 whiteApps / blackApps */
+    fun parseCirnoApps(json: String): Pair<List<String>, List<String>> {
+        val obj = try { org.json.JSONObject(json) } catch (e: Exception) { return emptyList<String>() to emptyList<String>() }
         fun arr(name: String): List<String> {
             val ja = obj.optJSONArray(name) ?: return emptyList()
             val out = ArrayList<String>(ja.length())
             for (i in 0 until ja.length()) {
-                val s = ja.optString(i, "").trim()
+                // Cirno 的条目格式是 "包名#userId"，只取包名部分
+                val s = ja.optString(i, "").trim().substringBefore('#')
                 if (s.isNotEmpty()) out.add(s)
             }
-            return out
+            return out.sorted().distinct()
         }
-        val white = arr("whiteApps")
-        val black = arr("blackApps")
-        var addW = 0
-        var addB = 0
-        if (white.isNotEmpty()) {
-            val cur = list("protect.list").toMutableSet()
-            val before = cur.size
-            cur.addAll(white)
-            addW = cur.size - before
-            if (addW > 0) writeListNoReload("protect.list", "# 白名单（含 Cirno 导入）", cur)
-        }
-        if (black.isNotEmpty()) {
-            val cur = list("blacklist.list").toMutableSet()
-            val before = cur.size
-            cur.addAll(black)
-            addB = cur.size - before
-            if (addB > 0) writeListNoReload("blacklist.list", "# 黑名单（含 Cirno 导入）", cur)
-        }
-        if (addW > 0 || addB > 0) reload()
-        return addW to addB
+        return arr("whiteApps") to arr("blackApps")
+    }
+
+    /**
+     * 导入勾选的 Cirno 条目。merge=true 与现有名单取并集；
+     * merge=false 用勾选项整体覆盖现有名单（白名单永远保留 com.yg.appkiller）。
+     * 返回写入后的 "白名单总数 / 黑名单总数"。
+     */
+    fun importCirnoSelection(white: List<String>, black: List<String>, merge: Boolean): Pair<Int, Int> {
+        if (!Shell.rootOk()) return 0 to 0
+        val wSet = if (merge) list("protect.list").toMutableSet() else mutableSetOf("com.yg.appkiller")
+        wSet.addAll(white)
+        val bSet = if (merge) list("blacklist.list").toMutableSet() else mutableSetOf()
+        bSet.addAll(black)
+        writeListNoReload("protect.list", "# 白名单（含 Cirno 导入）", wSet)
+        writeListNoReload("blacklist.list", "# 黑名单（含 Cirno 导入）", bSet)
+        reload()
+        return wSet.size to bSet.size
     }
 
     private fun writeListNoReload(name: String, header: String, items: Collection<String>) {
@@ -353,7 +365,15 @@ data class AppEntry(
 )
 
 object AppRepo {
+    /** 应用列表缓存：切页不再重跑 pm list packages + 逐包取标签 */
+    private const val INSTALLED_TTL_MS = 120_000L
+    @Volatile private var installedCache: Pair<Long, List<AppEntry>>? = null
+
+    fun invalidateInstalled() { installedCache = null }
+
     fun installed(ctx: Context): List<AppEntry> {
+        val c = installedCache
+        if (c != null && System.currentTimeMillis() - c.first < INSTALLED_TTL_MS) return c.second
         val pm = ctx.packageManager
         val out = ArrayList<AppEntry>()
         val seen = HashSet<String>()
@@ -377,7 +397,9 @@ object AppRepo {
             }
         }
         if (out.isNotEmpty()) {
-            return out.sortedWith(compareBy({ !it.system }, { it.label }))
+            val sorted = out.sortedWith(compareBy({ !it.system }, { it.label }))
+            installedCache = System.currentTimeMillis() to sorted
+            return sorted
         }
 
         for (ai in pm.getInstalledApplications(0)) {
@@ -390,7 +412,9 @@ object AppRepo {
             val persist = (ai.flags and android.content.pm.ApplicationInfo.FLAG_PERSISTENT) != 0
             out.add(AppEntry(ai.packageName, pm.getApplicationLabel(ai).toString(), sys, persist))
         }
-        return out.sortedWith(compareBy({ !it.system }, { it.label }))
+        val sorted = out.sortedWith(compareBy({ !it.system }, { it.label }))
+        installedCache = System.currentTimeMillis() to sorted
+        return sorted
     }
 
     fun labelMap(ctx: Context): Map<String, String> {
