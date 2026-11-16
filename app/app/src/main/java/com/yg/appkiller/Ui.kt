@@ -145,16 +145,14 @@ fun SegmentedRow(
 fun PanelCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
-    content: @Composable () -> Unit,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
 ) {
-    if (onClick != null) {
-        Card(modifier = modifier, insideMargin = PaddingValues(14.dp), showIndication = true, onClick = onClick) {
-            content()
-        }
-    } else {
-        Card(modifier = modifier, insideMargin = PaddingValues(14.dp)) {
-            content()
-        }
+    com.yg.appkiller.ui.utils.CirnoCard(
+        modifier = modifier,
+        insideMargin = PaddingValues(14.dp),
+        onClick = onClick,
+    ) {
+        content()
     }
 }
 

@@ -1,5 +1,6 @@
 package com.yg.appkiller
 
+import com.yg.appkiller.ui.CirnoPage
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -67,9 +68,8 @@ fun RunningPage() {
             (labels[it.pkg] ?: "").contains(query, true)
     }
 
-    Column(Modifier.fillMaxSize()) {
-        PageHeader("运行列表", "被冻结并正在计时的应用")
-        Column(Modifier.padding(horizontal = 12.dp)) {
+    CirnoPage(title = "运行列表", subtitle = "被冻结并正在计时的应用") {
+        item {
             TextField(
                 value = query,
                 onValueChange = { query = it },
@@ -77,9 +77,8 @@ fun RunningPage() {
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        Spacer(Modifier.height(6.dp))
         if (shown.isEmpty()) {
-            Column(Modifier.padding(horizontal = 12.dp)) {
+            item {
                 PanelCard(Modifier.fillMaxWidth()) {
                     Column {
                         Text(
@@ -97,13 +96,6 @@ fun RunningPage() {
                 }
             }
         }
-        LazyColumn(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            verticalArrangement = Arr.spacedBy(3.dp),
-        ) {
             items(shown, key = { it.pkg }) { app ->
                 val label = labels[app.pkg] ?: app.pkg.substringAfterLast('.')
                 val frac = (app.frozenSec.toFloat() / timeoutSec.toFloat()).coerceIn(0f, 1f)
@@ -146,6 +138,5 @@ fun RunningPage() {
                 }
             }
             item { Spacer(Modifier.height(12.dp)) }
-        }
     }
 }

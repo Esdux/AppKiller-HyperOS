@@ -1,5 +1,6 @@
 package com.yg.appkiller
 
+import com.yg.appkiller.ui.CirnoPage
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -69,10 +70,9 @@ fun AppListPage() {
             }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        PageHeader("应用列表", "开关打开 = 加入白名单（永不清理）")
-        InnerTabs(listOf("全部", "白名单", "系统应用"), filter) { filter = it }
-        Column(Modifier.padding(horizontal = 12.dp)) {
+    CirnoPage(title = "应用列表", subtitle = "开关打开 = 加入白名单（永不清理）") {
+        item { InnerTabs(listOf("全部", "白名单", "系统应用"), filter) { filter = it } }
+        item {
             TextField(
                 value = query,
                 onValueChange = { query = it },
@@ -80,14 +80,6 @@ fun AppListPage() {
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        Spacer(Modifier.height(6.dp))
-        LazyColumn(
-            Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
             items(shown, key = { it.pkg }) { app ->
                 val inWhite = white.contains(app.pkg)
                 PanelCard(Modifier.fillMaxWidth()) {
@@ -119,13 +111,13 @@ fun AppListPage() {
                     }
                 }
             }
-        }
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        item {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             Text(
                 text = when {
                     !loaded -> "加载中…"
@@ -158,6 +150,7 @@ fun AppListPage() {
                 enabled = dirty && !saving,
             ) {
                 Text(if (saving) "保存中…" else "保存并重载", fontSize = 14.sp)
+            }
             }
         }
     }

@@ -1,5 +1,6 @@
 package com.yg.appkiller
 
+import com.yg.appkiller.ui.CirnoPage
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -72,12 +73,10 @@ fun StatusPage() {
     val enabled = cfg["ENABLE"] != "0"
     val frozenProcs = snap.apps.sumOf { it.frozenProcs }
 
-    Column(Modifier.fillMaxSize()) {
-        PageHeader("AppKiller", "后台冻结超时清理 · HyperOS greeze")
-        LazyColumn(
-            Modifier.fillMaxSize().padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+    CirnoPage(
+        title = "AppKiller",
+        subtitle = "后台冻结超时清理 · HyperOS greeze",
+    ) {
             item {
                 PanelCard(Modifier.fillMaxWidth()) {
                     Column {
@@ -190,8 +189,7 @@ fun StatusPage() {
                     }
                 }
             }
-            item { Spacer(Modifier.height(12.dp)) }
-        }
+    item { Spacer(Modifier.height(12.dp)) }
     }
 }
 

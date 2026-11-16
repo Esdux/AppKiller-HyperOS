@@ -1,5 +1,9 @@
 package com.yg.appkiller
 
+import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
+import com.yg.appkiller.ui.utils.pageScrollModifiers
+import com.yg.appkiller.ui.utils.AdaptiveTopAppBar
+import com.yg.appkiller.ui.app.LocalAppState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -62,14 +66,25 @@ fun SettingsPage() {
         cooldown = c["KILL_COOLDOWN_SEC"] ?: "180"
     }
 
-    Column(Modifier.fillMaxSize()) {
-        PageHeader("设置", "写入模块 config.conf 后热重载")
+    val appState = LocalAppState.current
+    val scrollBehavior = MiuixScrollBehavior()
+    Column(
+        Modifier
+            .fillMaxSize()
+            .pageScrollModifiers(appState.enableScrollEndHaptic, false, scrollBehavior)
+    ) {
+        AdaptiveTopAppBar(
+            title = "设置",
+            subtitle = "写入模块 config.conf 后热重载",
+            isWideScreen = false,
+            scrollBehavior = scrollBehavior,
+        )
         Column(
             Modifier
                 .weight(1f)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             PanelCard(Modifier.fillMaxWidth()) {
                 Column {

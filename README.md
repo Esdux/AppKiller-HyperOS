@@ -63,14 +63,19 @@ appkiller-hyperos/
 │   ├── action.sh          模块管理器「执行」按钮入口
 │   ├── webroot/           KernelSU WebUI 页面
 │   └── bin/               appkillerd + appkiller.apk
-├── app/                   管理器 App（Kotlin + Compose + Miuix）
+├── app/                   管理器 App（Kotlin + Compose + Miuix + Cirno 界面壳）
+│   └── app/src/main/java/com/yg/appkiller/   四页 + ui/（壳、组件、工具）
 ├── build.sh               编译 daemon + 打包模块 zip
 └── LICENSE                GPL-3.0
 ```
 
 ## 管理器 App
 
-Miuix（`top.yukonga.miuix.kmp:miuix-ui`）四页界面，布局与 [Cirno](https://github.com/Adkimsm/Cirno) 一致：
+界面层**直接搬自 [Cirno](https://github.com/Adkimsm/Cirno) 的 Compose 壳**（横向分页 + 浮动胶囊底栏 + CirnoCard + 壁纸模糊），
+组件来自 [Miuix](https://github.com/compose-miuix-ui/miuix) 0.9.4 与 [kyant0/backdrop](https://github.com/Kyant0/backdrop)。
+这套壳已抽成通用框架放在 `tools/compose-cirno-shell/`，可整套复制到别的 Compose 工程。
+
+四页：
 
 | 页 | 内容 |
 | --- | --- |
@@ -80,6 +85,20 @@ Miuix（`top.yukonga.miuix.kmp:miuix-ui`）四页界面，布局与 [Cirno](http
 | **设置** | 总开关、观察模式、调试日志、阈值、扫描间隔、清理方式与范围、默认策略、节流参数、日志尾部 |
 
 开关语义速记：**应用列表里打开开关，就是把该应用加入白名单，它永远不会被清理；关掉就按黑名单 / persistent / 系统应用 / 默认策略继续判定。**
+
+### 界面层结构（`app/app/src/main/java/com/yg/appkiller/`）
+
+| 位置 | 说明 |
+| --- | --- |
+| `MainActivity.kt` | 入口：`AppRoot` → 主题 → `AppState` → `MiuixBackground` → `AppContent` |
+| `ui/app/AppContent.kt` | 壳：`HorizontalPager` + `FloatingBottomBar`（4 个 tab，图标 + 文字，可拖拽切页） |
+| `ui/app/AppState.kt` / `Theme.kt` | 全局界面状态（模糊、分页滑动、回弹、圆角）与 Miuix 主题控制 |
+| `ui/PageKit.kt` | `CirnoPage`：`AdaptiveTopAppBar` + `LazyColumn` + 给浮动底栏预留的 150dp 底部留白 |
+| `ui/utils/*` | `PageUtils`（滚动修饰/顶栏/纹理模糊）、`CirnoCard`、`BackgroundManager`（壁纸）、`MiuixBackground` |
+| `ui/custom/*` | `FloatingBottomBar`、`DampedDragAnimation`、`InteractiveHighlight`（AGSL 高光）、`DragGestureInspector` |
+| `StatusPage` / `RunningPage` / `AppListPage` / `SettingsPage` | 四页业务内容 |
+
+minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求），页面底部统一留 150dp 给浮动底栏。
 
 数据通道双路：
 
@@ -111,7 +130,7 @@ Miuix（`top.yukonga.miuix.kmp:miuix-ui`）四页界面，布局与 [Cirno](http
 
 ## 安装
 
-1. KernelSU / Magisk 管理器刷入 `dist/appkiller-v1.1.zip`
+1. KernelSU / Magisk 管理器刷入 `dist/appkiller-v1.2.zip`
 2. 重启（或 `sh /data/adb/modules/appkiller/action.sh start`）
 3. 开机后模块自动安装管理器 App；也可从 KernelSU 打开 WebUI
 4. 首次进 App 会弹一次 KernelSU 授权，允许后名单与状态才能直读；不授权时走本地控制端口，功能仍在
@@ -128,7 +147,12 @@ JAVA_HOME=/path/to/jdk21 ANDROID_HOME=/path/to/android-sdk \
   gradle :app:assembleDebug     # 管理器 APK
 ```
 
-依赖来源：androidx 走阿里云镜像 / Maven Central；miuix 默认从 Maven Central 解析（`top.yukonga.miuix.kmp:miuix-ui` 等）。
+主要依赖：`compose-bom 2026.08.00`、`activity-compose 1.13.0`、`top.yukonga.miuix.kmp:{miuix-ui, miuix-icons, miuix-preference, miuix-blur, miuix-shader}:0.9.4`、
+`io.github.kyant0:backdrop:1.0.6`、`androidx.compose.material3:{material3, material3-window-size-class}`。
+**minSdk 33**（`miuix-blur-android:0.9.4` 强制），compileSdk/targetSdk 37，AGP 9.4.0，Kotlin 2.4.10。
+
+依赖来源：androidx 走阿里云镜像 / Maven Central；miuix 默认从 Maven Central 解析（`top.yukonga.miuix.kmp:*`）。
+注意 `miuix-navigation3-ui` **最高只有 0.9.3**，本工程不引用它（导航壳自写）；`isRenderEffectSupported` 在 0.9.4 位于 `miuix-shader`。
 
 如果本机有 miuix 的离线仓库，可用环境变量注入，构建脚本会在仓库列表里追加它：
 

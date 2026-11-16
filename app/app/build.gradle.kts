@@ -11,7 +11,7 @@ android {
 
     defaultConfig {
         applicationId = "com.yg.appkiller"
-        minSdk = 26
+        minSdk = 33
         targetSdk = 37
         versionCode = 1
         versionName = "1.0"
@@ -47,6 +47,14 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.runtime:runtime")
-    implementation("top.yukonga.miuix.kmp:miuix-ui:0.9.4-rc01")
-    implementation("top.yukonga.miuix.kmp:miuix-icons:0.9.4-rc01")
+    implementation("top.yukonga.miuix.kmp:miuix-ui:0.9.4")
+    implementation("top.yukonga.miuix.kmp:miuix-icons:0.9.4")
+    implementation("top.yukonga.miuix.kmp:miuix-preference:0.9.4")
+    implementation("top.yukonga.miuix.kmp:miuix-blur:0.9.4")
+    implementation("top.yukonga.miuix.kmp:miuix-shader:0.9.4")
+    implementation("androidx.navigation3:navigation3-runtime:1.1.4")
+    implementation("androidx.navigationevent:navigationevent-compose:1.1.2")
+    implementation("io.github.kyant0:backdrop:1.0.6")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material3:material3-window-size-class")
 }
