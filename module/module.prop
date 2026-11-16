@@ -1,0 +1,6 @@
+id=appkiller
+name=AppKiller 后台冻结超时清理
+version=v1.1
+versionCode=2
+author=YG
+description=HyperOS/MIUI 后台冻结超时清理：应用被系统冻结超过阈值且期间未被使用则主动清理，一旦回到可见状态立即重置计时。冻结判定直读 cgroup（greeze /frozen），零 hook。含 Miuix 风格管理器 App，黑白名单按 Cirno 语义：系统应用默认豁免可拉黑、普通应用默认清理可加白。

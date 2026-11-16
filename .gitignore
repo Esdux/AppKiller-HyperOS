@@ -1,0 +1,23 @@
+# 构建产物
+app/build/
+app/app/build/
+app/.gradle/
+.gradle/
+out/
+dist/
+module/bin/appkiller.apk
+module/bin/appkillerd
+
+# 本机配置（含 SDK 路径）
+app/local.properties
+local.properties
+
+# 临时脚本与侦察产物
+tools/
+*.log
+*.tmp
+
+# IDE
+.idea/
+*.iml
+.DS_Store

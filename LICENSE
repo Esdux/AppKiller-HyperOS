@@ -1,0 +1,11 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
+
+ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+ Everyone is permitted to copy and distribute verbatim copies
+ of this license document, but changing it is not allowed.
+
+  本项目的名单策略与冻结判定语义参考了 Cirno（GPL-3.0，
+  https://github.com/Adkimsm/Cirno），因此同样以 GPL-3.0 发布。
+
+  完整的 GPL-3.0 许可文本见 https://www.gnu.org/licenses/gpl-3.0.txt

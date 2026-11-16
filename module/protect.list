@@ -1,0 +1,101 @@
+# 保护名单：命中的包永不被清理（前缀 * 匹配，# 为注释）
+# 本表整份沿用 Cirno 的默认白名单 app/src/main/java/nep/timeline/cirno/CommonConstants.java
+# 语义也与 Cirno 一致：系统应用默认整体豁免（SYSTEM_DEFAULT=protect），
+# 只有用户主动拉进 blacklist.list 才会被处理。
+
+# ---- Cirno 自身 / 基础 ----
+com.yg.appkiller        # 本模块管理器自身（Cirno 用 BuildConfig.APPLICATION_ID，这里换成我们）
+android
+com.android.shell
+moe.shizuku.privileged.api   # Shizuku
+com.google.android.gsf       # 谷歌服务框架
+com.xiaomi.xmsf              # 小米服务框架
+com.huawei.hwid              # HMS 核心
+io.heckel.ntfy               # NTFY
+app.revanced.android.gms     # MicroG
+
+# ---- 小米 / 澎湃 ----
+com.xiaomi.smarthome         # 米家
+com.mfashiongallery.emag     # 小米画报
+com.miui.miwallpaper.moon    # 月球超级壁纸
+com.miui.miwallpaper.snowmountain  # 雪山超级壁纸
+com.miui.miwallpaper.saturn  # 土星超级壁纸
+com.miui.miwallpaper.geometry      # 几何超级壁纸
+com.miui.miwallpaper.mars    # 火星超级壁纸
+com.miui.miwallpaper.earth   # 地球超级壁纸
+com.xiaomi.mibrain.speech    # 系统语音引擎
+com.miui.securitymanager     # 手机管家
+com.miui.home                # 小米桌面
+com.mi.android.globallauncher # POCO 桌面
+com.miui.gallery             # 小米相册
+com.miui.mediaeditor         # 小米相册-编辑
+com.android.deskclock        # 时钟
+com.android.soundrecorder    # 录音机
+com.android.calendar         # 日历
+com.miui.screenrecorder      # 小米屏幕录制
+com.miui.weather2            # 小米天气
+com.miui.notes               # 小米笔记
+com.mi.earphone              # 小米耳机
+com.mi.health                # 小米健康
+
+# ---- OPPO / 一加 / 真我 ----
+com.edith.os                 # OPPO Edith OS
+com.coloros.alarmclock       # OPPO 时钟
+com.coloros.soundrecorder    # OPPO 录音机
+com.coloros.calendar         # OPPO 日历
+com.unionpay.tsmservice      # 银联可信服务安全组件
+com.finshell.wallet          # OPPO 钱包
+com.coloros.translate        # OPPO 语音翻译
+com.heytap.health            # OPPO 健康
+com.heytap.uwbconnect        # OPPO 云
+com.coloros.familyguard      # OPPO 家人守护
+com.coloros.oppopods         # OPPO 耳机
+com.coloros.shortcuts        # 小布指令
+com.coloros.compass2         # OPPO 指南针
+com.coloros.note             # OPPO 便签
+com.coloros.filemanager      # OPPO 文件管理
+com.coloros.backuprestore    # OPPO 手机搬家
+com.coloros.weather2         # OPPO 天气
+com.color.otaassistant       # OPPO OTA 助手
+com.oplus.caseflash          # 一加 CaseFlash
+com.oplus.riderMode          # 一加骑手模式
+andes.oplus.documentsreader  # 一加文档
+com.oplus.onet               # 一加 O+ 互联
+com.oplus.screenrecorder     # 一加录屏
+com.oplus.games              # 一加游戏助手
+com.oplus.consumerIRApp      # 一加红外遥控
+com.oplus.melody             # OPPO 无线耳机
+com.oneplus.brickmode        # 一加禅定空间
+com.oneplus.ctsprepare       # 一加 CTS 准备
+com.realme.link              # 真我互联
+com.realme.linkcn            # 真我互联大陆
+
+# ---- 其它 ----
+com.android.email                    # 邮件
+com.google.android.contactkeys       # Android System Key Verifier
+com.google.android.safetycore        # Android System SafetyCore
+com.google.android.apps.weather      # Pixel 天气
+com.google.android.googlequicksearchbox  # Google
+
+# ---- Root 管理器 ----
+io.github.vvb2060.magisk       # Magisk Alpha
+io.github.vvb2060.magisk.lite  # Magisk Lite
+io.github.huskydg.magisk       # Magisk Delta / Kitsune Mask
+com.topjohnwu.magisk           # Magisk
+com.thehitman7.cygisk          # Cygisk
+
+# ---- 三星 ----
+com.samsung.android.rampart
+com.samsung.android.messaging
+com.samsung.android.app.telephonyui
+com.samsung.android.dialer
+com.samsung.android.incallui
+com.samsung.android.smartcallprovider
+com.samsung.android.intellivoiceservice
+com.qti.qcc
+com.sec.epdg
+com.sec.imsservice
+
+# ---- 系统界面 ----
+com.android.systemui           # 系统界面
+miui.systemui.plugin           # 系统界面组件
