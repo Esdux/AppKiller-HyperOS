@@ -163,6 +163,8 @@ fun AppListPage() {
     var expanded by remember { mutableStateOf(false) }
     var searchValue by remember { mutableStateOf("") }
     var onlySystem by remember { mutableStateOf(false) }
+    var filterWhite by remember { mutableStateOf(false) }
+    var filterBlack by remember { mutableStateOf(false) }
     var all by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var white by remember { mutableStateOf<Set<String>>(emptySet()) }
     var black by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -203,6 +205,14 @@ fun AppListPage() {
 
     val filteredApps = all
         .filter { if (onlySystem) it.system else !it.system }
+        .filter {
+            // 白名单 / 黑名单可同时勾选：任一命中即保留（并集）
+            if (filterWhite || filterBlack) {
+                (filterWhite && white.contains(it.pkg)) || (filterBlack && black.contains(it.pkg))
+            } else {
+                true
+            }
+        }
         .filter {
             searchValue.isBlank() || it.pkg.contains(searchValue, true) ||
                 it.label.contains(searchValue, true)
@@ -335,20 +345,49 @@ fun AppListPage() {
                                 contentPadding = listContentPadding,
                             ) {
                                 item {
-                                    Row(
+                                    Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(horizontal = 12.dp, vertical = 4.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
                                     ) {
                                         Text(
                                             text = "共 " + all.size + " 个应用 · 白名单 " +
                                                 white.size + " · 黑名单 " + black.size,
                                             fontSize = 12.sp,
                                             color = colorScheme.onSurfaceVariantSummary,
-                                            modifier = Modifier.weight(1f),
                                         )
-
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = 8.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            FilterPill(
+                                                text = "白名单 " + white.size,
+                                                checked = filterWhite,
+                                                onClick = {
+                                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
+                                                    filterWhite = !filterWhite
+                                                },
+                                            )
+                                            FilterPill(
+                                                text = "黑名单 " + black.size,
+                                                checked = filterBlack,
+                                                onClick = {
+                                                    hapticFeedback.performHapticFeedback(HapticFeedbackType.Confirm)
+                                                    filterBlack = !filterBlack
+                                                },
+                                            )
+                                            Spacer(Modifier.weight(1f))
+                                            if (filterWhite || filterBlack) {
+                                                Text(
+                                                    text = "筛选 " + filteredApps.size,
+                                                    fontSize = 12.sp,
+                                                    color = colorScheme.primary,
+                                                )
+                                            }
+                                        }
                                     }
                                 }
 
@@ -454,6 +493,32 @@ fun AppListPage() {
                 }
             }
         }
+    }
+}
+
+/** 筛选胶囊：可勾选，选中态用主色描边与文字 */
+@Composable
+private fun FilterPill(text: String, checked: Boolean, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(50)
+    Box(
+        modifier = Modifier
+            .clip(shape)
+            .background(
+                if (checked) colorScheme.primary.copy(alpha = 0.16f)
+                else colorScheme.surfaceContainer,
+                shape,
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = text,
+            fontSize = 12.sp,
+            fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (checked) colorScheme.primary else colorScheme.onSurfaceVariantSummary,
+            maxLines = 1,
+            softWrap = false,
+        )
     }
 }
 

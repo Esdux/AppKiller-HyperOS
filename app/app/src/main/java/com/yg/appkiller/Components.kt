@@ -58,12 +58,27 @@ fun GroupTitle(text: String) {
     )
 }
 
+/**
+ * 图标内存缓存：LazyColumn 复用行时同一个包会被反复请求，
+ * 每次都 getApplicationIcon + 画 Bitmap 是列表滑动卡顿的主因。
+ * 键是包名，值是不可变 ImageBitmap，命中即零开销。
+ */
+private object IconCache {
+    private const val MAX = 400
+    private val map = object : LinkedHashMap<String, ImageBitmap>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageBitmap>?): Boolean = size > MAX
+    }
+    @Synchronized fun get(pkg: String): ImageBitmap? = map[pkg]
+    @Synchronized fun put(pkg: String, b: ImageBitmap) { map[pkg] = b }
+}
+
 /** 应用图标：圆角方图，取不到时退回首字母块 */
 @Composable
 fun AppIcon(pkg: String, label: String = "", size: Dp = 44.dp) {
     val ctx = LocalContext.current
-    var bmp by remember(pkg) { mutableStateOf<ImageBitmap?>(null) }
+    var bmp by remember(pkg) { mutableStateOf(IconCache.get(pkg)) }
     LaunchedEffect(pkg) {
+        if (bmp != null) return@LaunchedEffect
         bmp = withContext(Dispatchers.IO) {
             runCatching {
                 val d = ctx.packageManager.getApplicationIcon(pkg)
@@ -75,7 +90,7 @@ fun AppIcon(pkg: String, label: String = "", size: Dp = 44.dp) {
                     d.draw(Canvas(bm))
                     bm
                 }
-                b.asImageBitmap()
+                b.asImageBitmap().also { IconCache.put(pkg, it) }
             }.getOrNull()
         }
     }

@@ -85,12 +85,12 @@ object ModuleRepo {
         return map
     }
 
+    /** 存活判定优先走本地控制端口：毫秒级，且不 fork su */
     fun running(): Boolean {
-        if (Shell.rootOk()) {
-            val out = Shell.sh("kill -0 \$(cat $MODDIR/run/appkillerd.pid 2>/dev/null) 2>/dev/null && echo ok", 4000)
-            return out.contains("ok")
-        }
-        return Ctrl.ping()
+        if (Ctrl.ping()) return true
+        if (!Shell.rootOk()) return false
+        val out = Shell.sh("kill -0 \$(cat $MODDIR/run/appkillerd.pid 2>/dev/null) 2>/dev/null && echo ok", 4000)
+        return out.contains("ok")
     }
 
     fun pid(): Int {
@@ -100,13 +100,15 @@ object ModuleRepo {
         } ?: -1
     }
 
+    /** 状态快照优先走本地控制端口（daemon 内存直出），root 文件读取只作兜底 */
     fun statusRaw(): String? {
+        Ctrl.call("STATUS", 1200)?.let { if (it.contains("\"watching\"")) return it }
         if (Shell.rootOk()) return readBundle()["run/state.json"]
-        return Ctrl.call("STATUS")
+        return null
     }
 
     fun configMap(): Map<String, String> {
-        val raw = if (Shell.rootOk()) readBundle()["config.conf"] else Ctrl.call("CFG")
+        val raw = Ctrl.call("CFG", 1200) ?: if (Shell.rootOk()) readBundle()["config.conf"] else null
         if (raw.isNullOrBlank()) return emptyMap()
         val map = LinkedHashMap<String, String>()
         for (line in raw.lines()) {
@@ -141,7 +143,8 @@ object ModuleRepo {
     }
 
     fun list(name: String): List<String> {
-        val raw = if (Shell.rootOk()) readBundle()[name] else Ctrl.call("LIST " + ctrlName(name))
+        val raw = Ctrl.call("LIST " + ctrlName(name), 1200)
+            ?: if (Shell.rootOk()) readBundle()[name] else null
         if (raw.isNullOrBlank()) return emptyList()
         return raw.lines()
             .map { it.trim() }

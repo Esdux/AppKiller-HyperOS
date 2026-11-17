@@ -103,26 +103,23 @@ fun RunningPage() {
     var snap by remember { mutableStateOf(StatusSnapshot()) }
     var labels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var cfg by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
-    var tick by remember { mutableIntStateOf(0) }
+    val refreshCh = remember { kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED) }
     var hasLoadedOnce by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var armedPkg by remember { mutableStateOf("") }
     var armedAt by remember { mutableStateOf(0L) }
     val keyboardController = LocalSoftwareKeyboardController.current
 
-    LaunchedEffect(tick) {
-        val d = withContext(Dispatchers.IO) {
-            arrayOf<Any>(StateRepo.snapshot(), ModuleRepo.configMap())
-        }
-        snap = d[0] as StatusSnapshot
-        cfg = d[1] as Map<String, String>
-        hasLoadedOnce = true
-    }
+    // 单常驻协程：1 秒一轮只做一次轻量拉取，不再重建协程，也不重复读配置
     LaunchedEffect(Unit) {
         labels = withContext(Dispatchers.IO) { AppRepo.labelMap(ctx) }
+        cfg = withContext(Dispatchers.IO) { ModuleRepo.configMap() }
         while (true) {
-            delay(1000)
-            tick++
+            val s = withContext(Dispatchers.IO) { StateRepo.snapshot() }
+            if (s.apps.isNotEmpty() || !hasLoadedOnce) snap = s
+            hasLoadedOnce = true
+            // 等 1 秒；期间若用户操作要求立即刷新则提前醒来
+            kotlinx.coroutines.withTimeoutOrNull(1000L) { refreshCh.receive() }
         }
     }
 
@@ -249,7 +246,7 @@ fun RunningPage() {
                                         val r = withContext(Dispatchers.IO) { Ctrl.killPkg(item.pkg, "force_stop") }
                                         Toast.makeText(ctx, "已清理 " + itemLabel + "：" + r.trim(), Toast.LENGTH_SHORT).show()
                                     }
-                                    tick++
+                                    refreshCh.trySend(Unit)
                                 } else {
                                     armedPkg = item.pkg
                                     armedAt = now

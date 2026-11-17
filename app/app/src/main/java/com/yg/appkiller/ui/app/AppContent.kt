@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -104,7 +105,8 @@ fun AppContent() {
         HorizontalPager(
             state = pagerState,
             userScrollEnabled = appState.enablePageUserScroll,
-            beyondViewportPageCount = PAGE_COUNT - 1,
+            // 只保活左右各一页：四页全保活会让三个页面的轮询同时跑，白白占 CPU
+            beyondViewportPageCount = 1,
             modifier = Modifier
                 .fillMaxSize()
                 .then(if (appState.blur && backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier),
@@ -141,8 +143,11 @@ private fun CirnoImportDialog() {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var resultMsg by remember { mutableStateOf("") }
-    // labelMap 走 AppRepo 缓存，命中时是纯内存操作
-    val labels = remember { AppRepo.labelMap(ctx) }
+    // labelMap 可能触发一次 su + 逐包取标签，绝不能放在 composition 里同步跑
+    var labels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    LaunchedEffect(Unit) {
+        labels = withContext(Dispatchers.IO) { AppRepo.labelMap(ctx) }
+    }
 
     OverlayDialog(
         title = "导入 Cirno 名单",

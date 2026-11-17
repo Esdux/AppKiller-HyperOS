@@ -135,31 +135,35 @@ private fun InfoContent(
     var cfg by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var whiteCount by remember { mutableIntStateOf(-1) }
     var blackCount by remember { mutableIntStateOf(-1) }
-    var tick by remember { mutableIntStateOf(0) }
+    val refreshCh = remember { kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED) }
     var logTail by remember { mutableStateOf("") }
     var showLog by remember { mutableStateOf(false) }
 
-    LaunchedEffect(tick) {
-        val d = withContext(Dispatchers.IO) {
-            val r = ModuleRepo.running()
-            val s = StateRepo.snapshot()
-            val c = ModuleRepo.configMap()
-            val w = ModuleRepo.list("protect.list").count { it.isNotBlank() && !it.startsWith("#") }
-            val b = ModuleRepo.list("blacklist.list").count { it.isNotBlank() && !it.startsWith("#") }
-            arrayOf<Any>(r, s, c, w, b)
-        }
-        running = d[0] as Boolean
-        snap = d[1] as StatusSnapshot
-        cfg = d[2] as Map<String, String>
-        whiteCount = d[3] as Int
-        blackCount = d[4] as Int
-        pid = snap.pid
-        connecting = false
-    }
+    // 单常驻协程：名单计数与配置只在首轮读一次，之后每 2 秒只刷状态
     LaunchedEffect(Unit) {
+        var first = true
         while (true) {
-            delay(2000)
-            tick++
+            val d = withContext(Dispatchers.IO) {
+                val r = ModuleRepo.running()
+                val s = StateRepo.snapshot()
+                if (first) {
+                    val c = ModuleRepo.configMap()
+                    val w = ModuleRepo.list("protect.list").count { it.isNotBlank() && !it.startsWith("#") }
+                    val b = ModuleRepo.list("blacklist.list").count { it.isNotBlank() && !it.startsWith("#") }
+                    arrayOf<Any>(r, s, c, w, b)
+                } else {
+                    arrayOf<Any>(r, s, cfg, whiteCount, blackCount)
+                }
+            }
+            running = d[0] as Boolean
+            snap = d[1] as StatusSnapshot
+            cfg = d[2] as Map<String, String>
+            whiteCount = d[3] as Int
+            blackCount = d[4] as Int
+            pid = snap.pid
+            connecting = false
+            first = false
+            kotlinx.coroutines.withTimeoutOrNull(2000L) { refreshCh.receive() }
         }
     }
 
@@ -207,7 +211,7 @@ private fun InfoContent(
                                     if (running) ModuleRepo.stopDaemon() else ModuleRepo.startDaemon(ctx)
                                 }
                                 delay(600)
-                                tick++
+                                refreshCh.trySend(Unit)
                             }
                         },
                     )
