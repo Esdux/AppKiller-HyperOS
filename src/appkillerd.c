@@ -975,17 +975,30 @@ int pkg_has_visible(const char *pkg) {
 
 /* ============================ 执行清理 ============================ */
 
+/* 跑一次 am 子命令，返回 1 表示成功。
+ *
+ * 必须走 sh -c，不能直接 execl("/system/bin/am", ...)：
+ *   /system/bin/am 是个 shell 包装脚本，最终 exec app_process，而 app_process 依赖
+ *   ANDROID_DATA / ANDROID_ROOT / BOOTCLASSPATH 这些环境变量。daemon 由 nohup 从
+ *   service.sh 拉起，环境极简，直接 execl 过去这些变量是空的，am 会静默失败 ——
+ *   表现就是「KILLPKG 回 OK，但包立刻被系统拉回来，跟没杀一样」。
+ *   交给 sh 执行，sh 会按 /system/bin/sh 的规则补好环境。
+ *
+ * 这是实测出来的：同样的 am force-stop com.tencent.mm，在 adb shell 里跑
+ * 5 秒后无残留，daemon 里 execl 过去却完全没效果。 */
 static int am_command(const char *sub, const char *pkg) {
     pid_t p = fork();
     if (p == 0) {
         int nul = open("/dev/null", O_WRONLY);
         if (nul >= 0) { dup2(nul, STDOUT_FILENO); dup2(nul, STDERR_FILENO); close(nul); }
-        execl("/system/bin/am", "am", sub, pkg, (char *)NULL);
+        char cmd[PATH_LEN];
+        snprintf(cmd, sizeof(cmd), "am %s %s", sub, pkg);
+        execl("/system/bin/sh", "sh", "-c", cmd, (char *)NULL);
         _exit(127);
     }
     if (p < 0) return 0;
     int status = 0, done = 0;
-    for (int i = 0; i < 60; i++) {
+    for (int i = 0; i < 80; i++) {
         pid_t r = waitpid(p, &status, WNOHANG);
         if (r == p) { done = 1; break; }
         if (r < 0) break;
@@ -994,9 +1007,13 @@ static int am_command(const char *sub, const char *pkg) {
     if (!done) {
         kill(p, SIGKILL);
         waitpid(p, &status, 0);
+        log_msg("am %s %s timeout", sub, pkg);
         return 0;
     }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!ok) log_msg("am %s %s failed rc=%d", sub, pkg,
+                     WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    return ok;
 }
 
 /* 把冻结中的 pid 移出 /frozen 解冻：冻结态下信号不投递，必须先 thaw 再 kill */
@@ -1008,6 +1025,99 @@ static void thaw_pid(int pid) {
     if (!f) return;
     fprintf(f, "%d", pid);
     fclose(f);
+}
+
+/* 定义在下面：sweep_rounds() 要调它，但它在文件里排得更后 */
+static int sweep_survivors(const char *pkg, const char *scope, int *killed,
+                           char *pidlist, size_t pidn);
+
+/* 把包内所有「该清理的」进程先 SIGSTOP 按住，返回个数，并填 pidlist。
+ *
+ * 为什么必须先暂停：
+ *   SIGKILL 本身不可捕获，但「清理」不是原子操作。两个窗口会让进程"复活"：
+ *   ① 被杀进程在最后一刻仍可能 fork 子进程 / 走完 Application.onCreate 里的自拉起逻辑；
+ *   ② system_server 收到进程死亡通知后，会按 ServiceRecord、JobScheduler、闹钟
+ *      立刻重启它 —— 时间点就在我们上一次扫描之后几十毫秒。
+ *   先把整包进程全部 SIGSTOP，它们停在原地不再执行任何代码；再统一 SIGKILL，
+ *   中间就没有"边杀边起"的窗口了。
+ *
+ * 冻结进程要先 thaw 再 STOP：thaw 那一刻它会立刻被调度，不按住就可能跑完一段代码。 */
+static int stop_pkg_procs(const char *pkg, const char *scope,
+                          int *pids, int max_pids,
+                          char *pidlist, size_t pidn, int dry_run) {
+    if (!pkg || !*pkg || !pids || max_pids < 1) return 0;
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d)) != NULL && n < max_pids) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        int pid = atoi(e->d_name);
+        if (pid <= 1) continue;
+
+        char dpath[64];
+        snprintf(dpath, sizeof(dpath), "/proc/%d", pid);
+        struct stat st;
+        if (stat(dpath, &st) != 0) continue;
+        int uid = (int)st.st_uid;
+        if (uid < g_cfg.min_uid || uid_is_isolated(uid)) continue;
+
+        char raw[512];
+        if (read_cmdline(pid, raw, sizeof(raw)) != 0) continue;
+        if (raw[0] == '/') continue;
+        char pk[PKG_LEN];
+        normalize_pkg(raw, pk, sizeof(pk));
+        if (!pkg_proc_match(pkg, pk)) continue;
+
+        int adj = read_oom_adj(pid);
+        if (adj == INT_MIN || adj < 0) continue;
+        int st0 = read_proc_state(pid);
+        char cg0[PATH_LEN];
+        if (read_cgroup(pid, cg0, sizeof(cg0)) != 0) cg0[0] = '\0';
+        int frz0 = proc_is_frozen(pid, cg0, st0);
+        if (!frz0 && adj < g_cfg.active_adj) continue;   /* 未冻结且可见：绝不动 */
+        if (!strcmp(scope, "frozen") && !frz0) continue;
+
+        /* 用户在这个进程上选了「跳过不清理」，就别按住它 —— 按住也是打扰 */
+        perproc_t *pp = perproc_lookup(raw);
+        if (pp && pp->mode[0] && !strcmp(pp->mode, "skip")) continue;
+
+        if (!dry_run) {
+            thaw_pid(pid);
+            kill(pid, SIGSTOP);
+        }
+        if (pidlist && pidn > 1) {
+            size_t used = strlen(pidlist);
+            char num[12];
+            snprintf(num, sizeof(num), "%d", pid);
+            if (used + strlen(num) + 2 < pidn) {
+                if (used) strncat(pidlist, ",", pidn - used - 1);
+                strncat(pidlist, num, pidn - strlen(pidlist) - 1);
+            }
+        }
+        pids[n++] = pid;
+    }
+    closedir(d);
+    return n;
+}
+
+/* 收尾：反复扫，把刚被系统拉起来的也按住杀掉，最多 rounds 轮。
+ *
+ * 一轮不够。system_server 的重启判定在进程死亡后几十毫秒才发生，正好落在上一次
+ * 扫描之后；扫三轮（每轮间隔 150ms）才能覆盖这个窗口。中途扫干净就提前退出，
+ * 不给常驻应用白付代价。 */
+static int sweep_rounds(const char *pkg, const char *scope, int *killed,
+                        char *pidlist, size_t pidn, int rounds) {
+    int total = 0;
+    for (int i = 0; i < rounds; i++) {
+        int before = killed ? *killed : 0;
+        int left = sweep_survivors(pkg, scope, killed,
+                                   i == 0 ? pidlist : NULL, i == 0 ? pidn : 0);
+        if (!left) break;
+        total += (killed ? *killed : 0) - before;
+        usleep(150000);
+    }
+    return total;
 }
 
 /* 单进程按 perproc 方式清理。
@@ -1027,15 +1137,24 @@ static int kill_one_by_mode(int pid, const char *pkg, const char *mode,
     if (dry_run) { if (killed) (*killed)++; return 1; }
 
     if (!strcmp(mode, "am_kill")) {
+        /* 温和档保留 SIGTERM 收尾：先让应用自己走 onDestroy，200ms 后还在补刀。
+         * 补刀前必须 SIGSTOP 按住 —— SIGTERM 没起作用说明它正忙着自拉起，
+         * 直接 SIGKILL 会撞上它刚 fork 出来的子进程。 */
         thaw_pid(pid);
         if (kill(pid, SIGTERM) != 0) return 1;
         usleep(200000);
-        if (kill(pid, 0) == 0) kill(pid, SIGKILL);
+        if (kill(pid, 0) == 0) {
+            kill(pid, SIGSTOP);
+            kill(pid, SIGKILL);
+        }
         if (killed) (*killed)++;
         return 1;
     }
 
+    /* sigkill / force_stop：thaw 之后进程会立刻被调度，先 SIGSTOP 按住再 SIGKILL，
+     * 中间不留"跑一小段自拉起代码"的窗口。 */
     thaw_pid(pid);
+    kill(pid, SIGSTOP);
     kill(pid, SIGKILL);
     if (!strcmp(mode, "force_stop") && allow_pkg_cmd && pkg && *pkg)
         am_command("force-stop", pkg);
@@ -1095,74 +1214,67 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
     if (pidlist && pidn) pidlist[0] = '\0';
     if (!pkg || !*pkg) return 0;
 
-    if (!strcmp(mode, "am_kill") || !strcmp(mode, "force_stop")) {
-        if (dry_run) return 1;
-        int ok = am_command(!strcmp(mode, "am_kill") ? "kill" : "force-stop", pkg);
-        usleep(300000);
-        /* 冻结进程收不到 am 的杀信号：兜底 thaw+SIGKILL */
-        int left = sweep_survivors(pkg, scope, killed, pidlist, pidn);
-        if (left) log_msg("sweep pkg=%s survivors killed=%d", pkg, killed ? *killed : 0);
-        return ok || !left;
+    /* 统一的执行顺序：全部按住 → 统一杀掉 → 扫多轮清掉刚被拉起的。
+     *
+     * 不能边扫边杀。边扫边杀的必然结果是：先杀主进程，system_server 立刻按
+     * ServiceRecord 把 :push / :remote 拉起来，而我们扫到它们时它们已经是新进程，
+     * 于是日志上写着「杀 3 个」，实际还剩 1 个在跑。先 STOP 就堵住这个洞。 */
+    int pids[MAX_PROCS];
+    int n = stop_pkg_procs(pkg, scope, pids, MAX_PROCS, pidlist, pidn, dry_run);
+    if (dry_run) return n > 0;
+
+    if (n == 0) {
+        /* 没有可暂停的进程（全在前台 / 全被 skip / 根本不在这台设备）。
+         * force_stop 与 am_kill 仍要走一次 am —— 它们能处理"进程此刻恰好不存在，
+         * 但系统还挂着它的 ServiceRecord"的情况，这也是这两个档存在的意义。 */
+        if (!strcmp(mode, "am_kill") || !strcmp(mode, "force_stop")) {
+            int ok = am_command(!strcmp(mode, "am_kill") ? "kill" : "force-stop", pkg);
+            usleep(300000);
+            int left = sweep_rounds(pkg, scope, killed, NULL, 0, 3);
+            if (left) log_msg("sweep pkg=%s survivors killed=%d", pkg, killed ? *killed : 0);
+            return ok || !left;
+        }
+        return 0;
     }
 
-    DIR *d = opendir("/proc");
-    if (!d) return 0;
-    struct dirent *e;
-    int any = 0;
-
-    while ((e = readdir(d)) != NULL) {
-        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-        int pid = atoi(e->d_name);
-        if (pid <= 0) continue;
-
-        char dpath[64];
-        snprintf(dpath, sizeof(dpath), "/proc/%d", pid);
-        struct stat st;
-        if (stat(dpath, &st) != 0) continue;
-        int uid = (int)st.st_uid;
-        if (uid < g_cfg.min_uid || uid_is_isolated(uid)) continue;
-
+    /* 逐个按「这个进程自己的方式」收尾。
+     *
+     * 每进程覆盖必须在这里生效，不能拿包级 mode 一把梭：用户给 :push 单独设了
+     * 「跳过不清理」、给 :remote 设了「am kill」，这些都是比包级更具体的意图。
+     * 暂停阶段已经按 skip 排除了它们，这里再按各自的 mode 决定怎么杀。
+     *
+     * 注意 SIGTERM 对 SIGSTOP 状态的进程只是挂起（pending），不会被处理 ——
+     * am_kill 档必须先 SIGCONT 让它恢复调度，才能收到 TERM。 */
+    for (int i = 0; i < n; i++) {
         char raw[512];
-        if (read_cmdline(pid, raw, sizeof(raw)) != 0) continue;
-        if (raw[0] == '/') continue;
-
-        char pk[PKG_LEN];
-        normalize_pkg(raw, pk, sizeof(pk));
-        if (!pkg_proc_match(pkg, pk)) continue;
-
-        int adj = read_oom_adj(pid);
-        if (adj == INT_MIN) continue;
-        if (adj < 0) continue;
-
-        /* 冻结判定先行：冻结中的进程不可能可见，adj 检查只约束未冻结进程
-         * （HyperOS greeze 冻结不改 oom_score_adj，实测 adj=0 仍被冻） */
-        int st0 = read_proc_state(pid);
-        char cg0[PATH_LEN];
-        if (read_cgroup(pid, cg0, sizeof(cg0)) != 0) cg0[0] = '\0';
-        int frz0 = proc_is_frozen(pid, cg0, st0);
-        if (!frz0 && adj < g_cfg.active_adj) continue;   /* 未冻结且可见：绝不动 */
-
-        /* 每进程覆盖优先于包级 mode：进程粒度比包粒度细，用户在这里设的就是更具体的意图 */
+        if (read_cmdline(pids[i], raw, sizeof(raw)) != 0) continue;
         perproc_t *pp = perproc_lookup(raw);
         const char *pm = (pp && pp->mode[0]) ? pp->mode : mode;
-        if (!strcmp(pm, "skip")) continue;
+        if (!strcmp(pm, "skip")) { kill(pids[i], SIGCONT); continue; }  /* 误按住的放开 */
 
-        if (!strcmp(scope, "frozen") && !frz0) continue;
-
-        any = 1;
-        if (pidlist && pidn > 1) {
-            size_t used = strlen(pidlist);
-            char num[12];
-            snprintf(num, sizeof(num), "%d", pid);
-            if (used + strlen(num) + 2 < pidn) {
-                if (used) strncat(pidlist, ",", pidn - used - 1);
-                strncat(pidlist, num, pidn - strlen(pidlist) - 1);
-            }
+        if (!strcmp(pm, "am_kill")) {
+            /* 温和档：放它跑一段走 onDestroy，200ms 后还在就按住断掉 */
+            kill(pids[i], SIGCONT);
+            kill(pids[i], SIGTERM);
+            usleep(200000);
+            if (kill(pids[i], 0) == 0) { kill(pids[i], SIGSTOP); kill(pids[i], SIGKILL); }
+        } else {
+            /* sigkill / force_stop：它已经在 STOP 里，直接断，不需要先 CONT */
+            kill(pids[i], SIGKILL);
         }
-        kill_one_by_mode(pid, pkg, pm, dry_run, 1, killed);
+        if (killed) (*killed)++;
     }
-    closedir(d);
-    return any;
+    log_msg("stopped+kill pkg=%s procs=%d mode=%s", pkg, n, mode);
+
+    if (!strcmp(mode, "force_stop")) {
+        am_command("force-stop", pkg);
+        usleep(200000);
+    }
+
+    /* 收尾：这几百毫秒里被拉起来的，一并按住杀掉 */
+    int extra = sweep_rounds(pkg, scope, killed, NULL, 0, 3);
+    if (extra > 0) log_msg("sweep pkg=%s extra=%d total=%d", pkg, extra, killed ? *killed : 0);
+    return 1;
 }
 
 int decide_round(int dry_run) {
