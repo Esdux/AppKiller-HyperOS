@@ -13,7 +13,7 @@
         android:theme="@style/Theme.AppKiller">
 
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.AppShellActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:theme="@style/Theme.AppKiller">
@@ -24,7 +24,13 @@
         </activity>
 
         <activity
-            android:name=".AppDetailActivity"
+            android:name=".ui.screens.ThemeActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:theme="@style/Theme.AppKiller" />
+
+        <activity
+            android:name=".ui.screens.AppDetailActivity"
             android:exported="false"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:theme="@style/Theme.AppKiller" />

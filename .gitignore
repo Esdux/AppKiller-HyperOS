@@ -23,3 +23,6 @@ tools/
 .DS_Store
 verify/
 shots/
+
+# 旧界面备份（重写前的快照，不入库）
+legacy_src/
