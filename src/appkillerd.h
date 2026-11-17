@@ -27,6 +27,11 @@
 #define PATH_LEN        320
 #define SMALL_LEN        32
 
+/* Android 的 Process.FIRST_APPLICATION_UID：小于它的 uid 全是系统/root/壳层用户。
+ * Cirno 用 ApplicationInfo.uid < FIRST_APPLICATION_UID 判定系统应用，
+ * 我们在 daemon 里直接比对 /proc/<pid> 的属主 uid，效果等价且不依赖清单文件。 */
+#define FIRST_APPLICATION_UID 10000
+
 typedef struct {
     int  enable;
     int  timeout_sec;
@@ -68,6 +73,18 @@ typedef struct {
     int       seen;       /* 本轮扫描是否仍见到该包 */
 } pkgent_t;
 
+/* 本轮扫描到的后台包（包内无可见进程），含未冻结的。
+ * 与 g_pkgs 的区别：g_pkgs 只留「正在计时」的，本表每轮重建、保留全部后台应用，
+ * 供管理器 App 的运行列表展示「已冻结 / 未冻结」两段。 */
+typedef struct {
+    char      pkg[PKG_LEN];
+    int       uid;
+    int       frozen;      /* 冻结进程数 */
+    int       total;       /* 进程总数 */
+    long long since;       /* 计时起点，0 = 未计时 */
+    int       protected;   /* 命中白名单 */
+} bgpkg_t;
+
 typedef struct {
     long long ts;
     char      pkg[PKG_LEN];
@@ -105,7 +122,7 @@ int  pkg_is_protected(const char *pkg);
 int  blacklist_load(const char *moddir);
 int  system_list_load(const char *moddir);
 int  immortal_load(const char *moddir);
-int  pkg_should_manage(const char *pkg);
+int  pkg_should_manage(const char *pkg, int uid);
 int  pkg_is_hard_protected(const char *pkg);
 int  perapp_load(const char *moddir);
 int  perproc_load(const char *moddir);

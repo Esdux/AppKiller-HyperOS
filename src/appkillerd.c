@@ -13,6 +13,7 @@
  */
 #define _GNU_SOURCE
 #include "appkillerd.h"
+#include "declprocs.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -60,6 +61,10 @@ static int       g_perproc_n = 0;
 
 static pkgent_t g_pkgs[MAX_PKGS];
 static int      g_pkg_n = 0;
+
+/* 本轮全部后台包（含未冻结），每轮重建，只用于 UI 展示 */
+static bgpkg_t g_bg[MAX_PKGS];
+static int     g_bg_n = 0;
 
 static hist_t g_hist[MAX_HISTORY];
 static int    g_hist_n = 0;
@@ -603,16 +608,25 @@ int pkg_is_hard_protected(const char *pkg) {
 }
 
 /*
- * 黑白名单策略（Cirno 式）：
+ * 黑白名单策略（Cirno 式，判定顺序与 FreezeExemptionChecker 对齐）：
  *   1. 硬保护        -> 永不处理
  *   2. 黑名单命中    -> 强制处理（优先级最高，系统应用也可被拉进黑名单）
  *   3. 白名单命中    -> 豁免
- *   4. 系统应用      -> 按 SYSTEM_DEFAULT（默认 protect）
- *   5. 普通应用      -> 按 USER_DEFAULT（默认 manage）
- * 注意：4 依赖 App 生成的 system_apps.list；文件缺失时系统应用也走 5，
- *       此时 protect.list 里的内置系统条目仍然兜底。
+ *   4. 当前输入法    -> 豁免
+ *   5. persistent    -> 豁免（黑名单可覆盖）
+ *   6. 系统应用      -> 按 SYSTEM_DEFAULT（默认 protect）
+ *   7. 普通应用      -> 按 USER_DEFAULT（默认 manage）
+ *
+ * 第 6 步是「系统应用默认白名单」，三路判定，任一路命中即算系统应用：
+ *   a) uid < FIRST_APPLICATION_UID(10000)  <- 与 Cirno 的
+ *      ApplicationInfo.uid < Process.FIRST_APPLICATION_UID 完全等价，运行时直接读
+ *      /proc/<pid> 的属主 uid，不依赖任何清单文件，也不会因包可见性受限而失效；
+ *   b) 命中 system_apps.list（App 用 pm list packages -s 生成，可选）；
+ *   c) 命中启动时 pm list packages -s 的兜底结果。
+ * a 这一路是关键：清单文件为空时旧实现会把系统应用全判成普通应用，
+ * 于是 system_default=protect 形同虚设，系统应用照样被杀。
  */
-int pkg_should_manage(const char *pkg) {
+int pkg_should_manage(const char *pkg, int uid) {
     if (pkg_is_hard_protected(pkg)) return 0;
     if (pkg_in_list2(g_blacklist, g_blacklist_n, pkg)) return 1;
     if (pkg_in_list2(g_protect, g_protect_n, pkg)) return 0;
@@ -620,6 +634,10 @@ int pkg_should_manage(const char *pkg) {
     if (g_ime_pkg[0] && strcmp(pkg, g_ime_pkg) == 0) return 0;
     /* persistent 应用：杀不掉，默认豁免（黑名单仍可覆盖） */
     if (pkg_in_list2(g_immortal, g_immortal_n, pkg)) return 0;
+    /* a) 运行时 uid 判定：uid < 10000 即系统应用（Cirno 的 PKGUtils.isSystemApp 前半段） */
+    if (uid > 0 && uid < FIRST_APPLICATION_UID)
+        return strcmp(g_cfg.system_default, "manage") == 0;
+    /* b/c) 清单判定（App 生成 or pm list packages -s 兜底） */
     if (pkg_in_list2(g_systemlist, g_systemlist_n, pkg))
         return strcmp(g_cfg.system_default, "manage") == 0;
     return strcmp(g_cfg.user_default, "protect") != 0;
@@ -840,7 +858,7 @@ void scan_round(void) {
         normalize_pkg(raw, pkg, sizeof(pkg));
         if (!pkg[0]) continue;
 
-        if (!pkg_should_manage(pkg)) continue;    /* 黑白名单 / 系统应用默认策略 */
+        if (!pkg_should_manage(pkg, uid)) continue;    /* 黑白名单 / 系统应用默认策略 */
 
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN) continue;
@@ -868,6 +886,23 @@ void scan_round(void) {
         else                                  scan[k].background++;
     }
     closedir(d);
+
+    /* 重建后台包表：本轮所有「包内无可见进程」的应用，含未冻结的。
+     * 运行列表要显示「全部后台应用并区分冻结状态」，而 g_pkgs 只保留正在计时的，
+     * 单靠它会让未冻结的后台应用整片消失。 */
+    g_bg_n = 0;
+    for (int i = 0; i < sn && g_bg_n < MAX_PKGS; i++) {
+        if (scan[i].active > 0) continue;      /* 有可见进程 = 在前台，不算后台 */
+        bgpkg_t *b = &g_bg[g_bg_n++];
+        memset(b, 0, sizeof(*b));
+        snprintf(b->pkg, PKG_LEN, "%s", scan[i].pkg);
+        b->uid       = scan[i].uid;
+        b->frozen    = scan[i].frozen;
+        b->total     = scan[i].total;
+        b->protected = pkg_is_protected(scan[i].pkg);
+        pkgent_t *pe = find_pkg(g_pkgs, &g_pkg_n, scan[i].pkg);
+        b->since = pe ? pe->since : 0;
+    }
 
     /* 合并到持久表 */
     for (int i = 0; i < g_pkg_n; i++) g_pkgs[i].seen = 0;
@@ -1140,7 +1175,7 @@ int decide_round(int dry_run) {
         if (p->since == 0) continue;
         long long dur = now - p->since;
         if (dur < g_cfg.timeout_sec) continue;
-        if (!pkg_should_manage(p->pkg)) continue;
+        if (!pkg_should_manage(p->pkg, p->uid)) continue;
         if (p->last_kill && (now - p->last_kill) < g_cfg.kill_cooldown_sec) continue;
         idx[n++] = i;
     }
@@ -1261,6 +1296,34 @@ void write_state(void) {
         first = 0;
     }
     fprintf(f, "%s],\n", first ? "" : "\n  ");
+
+    /* background：本轮全部后台包（含未冻结）。已冻结的排前面、冻结进程多的排前面，
+     * 其余按包名，前端拿到即可直接渲染「已冻结 / 未冻结」两段，不必再排序。 */
+    for (int i = 1; i < g_bg_n; i++) {
+        bgpkg_t v = g_bg[i];
+        int j = i - 1;
+        while (j >= 0 && (g_bg[j].frozen < v.frozen ||
+                          (g_bg[j].frozen == v.frozen && strcmp(g_bg[j].pkg, v.pkg) > 0))) {
+            g_bg[j + 1] = g_bg[j];
+            j--;
+        }
+        g_bg[j + 1] = v;
+    }
+    fprintf(f, "  \"background\": [");
+    for (int i = 0; i < g_bg_n; i++) {
+        bgpkg_t *b = &g_bg[i];
+        long long dur = b->since > 0 ? now - b->since : 0;
+        long long rem = b->since > 0 ? (long long)g_cfg.timeout_sec - dur : 0;
+        if (rem < 0) rem = 0;
+        fprintf(f, "%s\n    {\"pkg\": \"%s\", \"uid\": %d, \"frozen_procs\": %d, \"total_procs\": %d, "
+                   "\"frozen\": %s, \"counting\": %s, \"frozen_sec\": %lld, \"remain_sec\": %lld, "
+                   "\"protected\": %s}",
+                i ? "," : "", b->pkg, b->uid, b->frozen, b->total,
+                b->frozen > 0 ? "true" : "false",
+                b->since > 0 ? "true" : "false",
+                dur, rem, b->protected ? "true" : "false");
+    }
+    fprintf(f, "%s],\n", g_bg_n ? "\n  " : "");
 
     fprintf(f, "  \"history\": [");
     int total = g_hist_n > MAX_HISTORY ? MAX_HISTORY : g_hist_n;
@@ -1457,6 +1520,28 @@ static void ctl_handle(int c, char *req) {
                 "%d %s %d %d %s\n", pid, raw, adj, frz, pp ? pp->mode : "-");
         }
         closedir(d);
+        if (off == 0) { ctl_reply(c, "OK 0\n"); return; }
+        buf[off] = '\0';
+        ctl_reply(c, buf);
+        return;
+    }
+    if (!strncmp(cmd, "DECLPROCS ", 10)) {
+        /* 列出该包在 AndroidManifest.xml 里声明过的全部进程名。
+         *
+         * 与 PROCS 的区别：PROCS 扫 /proc，只列「此刻活着的」；DECLPROCS 解 APK 清单，
+         * 列「这个应用一共会有哪些进程」，应用没启动也有结果。两者互补 ——
+         * 二级页把 DECLPROCS 当骨架、PROCS 当实时状态叠上去，就不会因为应用没跑而显示空表。
+         *
+         * 输出每行一个名字，第一行是主进程（= 包名）。 */
+        char *pkg = trim(cmd + 10);
+        char names[64][PKG_LEN];
+        int n = decl_procs_for_pkg(pkg, &names[0][0], PKG_LEN, 64);
+        if (n < 0) { ctl_reply(c, "ERR manifest\n"); return; }
+        char buf[8192];
+        int off = 0;
+        for (int i = 0; i < n && off < (int)sizeof(buf) - (PKG_LEN + 4); i++) {
+            off += snprintf(buf + off, sizeof(buf) - off, "%s\n", names[i]);
+        }
         if (off == 0) { ctl_reply(c, "OK 0\n"); return; }
         buf[off] = '\0';
         ctl_reply(c, buf);

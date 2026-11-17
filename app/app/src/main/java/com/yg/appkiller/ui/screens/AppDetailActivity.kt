@@ -197,6 +197,9 @@ private fun AppDetailContent(
     var inBlack by remember { mutableStateOf(false) }
     var modeIndex by remember { mutableIntStateOf(0) }
     var procs by remember { mutableStateOf<List<Ctrl.ProcEntry>>(emptyList()) }
+    // 清单声明的进程名（DECLPROCS）。与 procs 互补：这份是「一共会有哪些进程」，
+    // 应用没启动也有；procs 是「此刻活着的」，带 pid/adj/冻结状态。
+    var declared by remember { mutableStateOf<List<String>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
 
     // 首轮读名单归属与每应用模式；之后每 2 秒刷一次进程列表。
@@ -212,6 +215,9 @@ private fun AppDetailContent(
                 modeIndex = modeToIndex(per.first)
             }
         }
+        // 清单只读一次：它是静态的，应用更新前不会变。解 APK 要读几 MB，不适合放进 2 秒轮询。
+        withContext(Dispatchers.IO) { Ctrl.declProcs(pkg) }.let { declared = it }
+
         while (true) {
             val list = withContext(Dispatchers.IO) { Ctrl.procs(pkg) }
             procs = list
@@ -343,36 +349,55 @@ private fun AppDetailContent(
 
         item(key = "procs") {
             Column {
-                SmallTitle(text = "当前进程 · " + procs.size)
+                // 合并两路数据：declared 是清单里声明的全部进程名（骨架），
+                // procs 是此刻活着的（带 pid/adj/冻结）。骨架保证应用没启动时也列得全，
+                // 实时态保证活着的进程能看到具体状态。
+                //
+                // 顺序：先按清单顺序（主进程在最前），再把清单里没有但正在跑的追加到末尾 ——
+                // 后者只会出现在清单没声明全的极端情况，但不该因此被藏起来。
+                val runningByCmd = procs.associateBy { it.cmdline }
+                val rows = ArrayList<Pair<String, Ctrl.ProcEntry?>>(declared.size + procs.size)
+                for (d in declared) rows.add(d to runningByCmd[d])
+                for (p in procs) if (!declared.contains(p.cmdline)) rows.add(p.cmdline to p)
+
+                val runningCount = procs.size
+                SmallTitle(
+                    text = "进程 · " + rows.size +
+                        if (runningCount > 0) "（运行中 " + runningCount + "）" else "",
+                )
                 Card(modifier = Modifier.nextCard()) {
-                    if (procs.isEmpty()) {
-                        // 空态写清楚原因：没有进程不是错误，是这个应用现在没在跑
+                    if (rows.isEmpty()) {
                         ArrowPreference(
-                            title = "没有运行中的进程",
-                            summary = "应用未启动，或守护进程未运行",
+                            title = "没有读到进程信息",
+                            summary = "清单解析失败，或守护进程未运行",
                             onClick = {},
                         )
                     } else {
-                        procs.forEach { p ->
+                        rows.forEach { (cmdline, live) ->
                             // 每进程一个下拉：清不清理，细到子进程。
                             //
                             // 标题只写进程名，不写包名：一个应用的所有进程包名部分完全相同，
                             // 每行重复一遍那串长包名，既挤掉真正有区别的信息（push / remote / worker），
                             // 又会让行高被撑成两行。主进程没有冒号，直接标「主进程」。
-                            val procName = p.cmdline.substringAfterLast(':')
-                                .takeIf { it.isNotEmpty() && it != p.cmdline }
+                            val procName = cmdline.substringAfterLast(':')
+                                .takeIf { it.isNotEmpty() && it != cmdline }
                                 ?: "主进程"
+                            // summary 是状态短语：活着给 pid/adj/冻结，没活着就说没在跑。
+                            // 空着不写会让人以为「这行坏了」。
+                            val state = if (live != null)
+                                "pid " + live.pid + " · adj " + live.adj +
+                                    (if (live.frozen) " · 已冻结" else "")
+                            else "未运行"
                             WindowDropdownPreference(
                                 items = PROC_MODE_LABELS,
-                                selectedIndex = procModeToIndex(p.mode),
+                                selectedIndex = procModeToIndex(live?.mode ?: "-"),
                                 title = procName,
-                                summary = "pid " + p.pid + " · adj " + p.adj +
-                                    (if (p.frozen) " · 已冻结" else ""),
+                                summary = state,
                                 onSelectedIndexChange = { idx ->
                                     val mode = indexToProcMode(idx)
                                     scope.launch {
                                         val ok = withContext(Dispatchers.IO) {
-                                            Ctrl.setPerProc(p.cmdline, mode)
+                                            Ctrl.setPerProc(cmdline, mode)
                                         }
                                         toast(if (ok) "已保存" else "设置失败：守护进程未运行")
                                         procs = withContext(Dispatchers.IO) { Ctrl.procs(pkg) }

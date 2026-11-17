@@ -324,10 +324,28 @@ data class FrozenApp(
     val managed: Boolean,
 )
 
+/**
+ * 一个后台应用（含未冻结的）。
+ *
+ * 与 [FrozenApp] 的区别：FrozenApp 只表示「正在计时的」，本类覆盖全部后台包，
+ * 用 [frozen] 区分两段。运行列表要显示「已冻结 / 未冻结」两段，就靠这个标志。
+ */
+data class BgApp(
+    val pkg: String,
+    val frozen: Boolean,
+    val counting: Boolean,
+    val frozenSec: Long,
+    val remainSec: Long,
+    val frozenProcs: Int,
+    val totalProcs: Int,
+    val protected: Boolean,
+)
+
 /** 守护进程 STATUS 报文的一次快照。 */
 data class StatusSnapshot(
     val uptimeSec: Long = 0,
     val apps: List<FrozenApp> = emptyList(),
+    val background: List<BgApp> = emptyList(),
     val pid: Int = 0,
 )
 
@@ -356,7 +374,27 @@ object StateRepo {
                     )
                 }
             }
-            StatusSnapshot(uptime, list.sortedByDescending { it.frozenSec }, pid)
+            // background：daemon 已按「冻结进程多的在前」排好，这里只做映射
+            val bgArr = root.optJSONArray("background")
+            val bg = ArrayList<BgApp>()
+            if (bgArr != null) {
+                for (i in 0 until bgArr.length()) {
+                    val o = bgArr.getJSONObject(i)
+                    bg.add(
+                        BgApp(
+                            pkg = o.optString("pkg"),
+                            frozen = o.optBoolean("frozen"),
+                            counting = o.optBoolean("counting"),
+                            frozenSec = o.optLong("frozen_sec"),
+                            remainSec = o.optLong("remain_sec"),
+                            frozenProcs = o.optInt("frozen_procs"),
+                            totalProcs = o.optInt("total_procs"),
+                            protected = o.optBoolean("protected"),
+                        )
+                    )
+                }
+            }
+            StatusSnapshot(uptime, list.sortedByDescending { it.frozenSec }, bg, pid)
         } catch (e: Exception) {
             StatusSnapshot()
         }
@@ -389,7 +427,19 @@ object AppRepo {
 
         // HyperOS 4 上即使声明了 QUERY_ALL_PACKAGES，PackageManager 也只返回本应用，
         // 所以有 root 时以 `pm list packages` 的全量输出为准，标签再逐个补。
+        //
+        // 系统应用的判定不能只看 getApplicationInfo(pkg).flags：包可见性受限时它返回 null，
+        // flags 与 sourceDir 全为空，系统应用会被误判成普通应用，写进 system_apps.list 后
+        // daemon 的「系统应用默认豁免」就形同虚设。改为三路取并集：
+        //   1) `pm list packages -s` 的直接输出（最可靠，不经过 PackageManager 可见性）
+        //   2) ApplicationInfo.uid < 10000（等价 Cirno 的 FIRST_APPLICATION_UID 判定）
+        //   3) FLAG_SYSTEM / 安装路径不在 /data 下（传统兜底）
         if (Shell.rootOk()) {
+            val sysPkgs = Shell.sh("pm list packages -s 2>/dev/null")
+                .lineSequence()
+                .map { it.removePrefix("package:").trim() }
+                .filter { it.isNotEmpty() }
+                .toHashSet()
             for (line in Shell.sh("pm list packages 2>/dev/null").lineSequence()) {
                 val pkg = line.removePrefix("package:").trim()
                 if (pkg.isEmpty() || !seen.add(pkg)) continue
@@ -399,7 +449,10 @@ object AppRepo {
                 } ?: pkg
                 val flags = ai?.flags ?: 0
                 val path = ai?.sourceDir ?: ""
-                val sys = (flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0 ||
+                val uid = ai?.uid ?: -1
+                val sys = pkg in sysPkgs ||
+                    (uid in 1 until 10000) ||
+                    (flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0 ||
                     (path.isNotEmpty() && !path.startsWith("/data/"))
                 val persist = (flags and android.content.pm.ApplicationInfo.FLAG_PERSISTENT) != 0
                 out.add(AppEntry(pkg, label, sys, persist))

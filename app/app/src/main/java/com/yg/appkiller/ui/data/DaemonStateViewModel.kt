@@ -27,6 +27,8 @@ data class DaemonState(
     val pid: Int = -1,
     val uptimeSec: Long = 0L,
     val watching: List<FrozenApp> = emptyList(),
+    /** 全部后台应用（含未冻结），已按「冻结进程多的在前」排序 */
+    val background: List<com.yg.appkiller.BgApp> = emptyList(),
     val protectCount: Int = 0,
     val blackCount: Int = 0,
     val config: Map<String, String> = emptyMap(),
@@ -89,6 +91,7 @@ class DaemonStateViewModel : ViewModel() {
             pid = snapshot.pid,
             uptimeSec = snapshot.uptimeSec,
             watching = snapshot.apps,
+            background = snapshot.background,
             protectCount = protect,
             blackCount = black,
             config = config,

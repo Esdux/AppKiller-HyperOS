@@ -62,6 +62,21 @@ object Ctrl {
         }
     }
 
+    /**
+     * DECLPROCS <pkg> -> 该包在 AndroidManifest.xml 里声明过的全部进程名。
+     *
+     * 与 [procs] 的区别：procs 扫 /proc，只列此刻活着的；这里解 APK 清单，列「这个应用
+     * 一共会有哪些进程」，应用没启动也有结果。二级页拿它当骨架，再把 procs 的实时状态
+     * 叠上去，就不会因为应用没跑而显示「没有运行中的进程」。
+     *
+     * 第一行是主进程（= 包名）。读不到清单时返回空表（老设备 / 无 root）。
+     */
+    fun declProcs(pkg: String): List<String> {
+        val raw = call("DECLPROCS " + pkg, 5000) ?: return emptyList()
+        if (raw.startsWith("ERR")) return emptyList()
+        return raw.trim().lines().map { it.trim() }.filter { it.isNotEmpty() }
+    }
+
     fun killPid(pid: Int): Boolean = (call("KILLPID " + pid, 2000) ?: "").startsWith("OK")
 
     /** GETPERAPP <pkg> -> Pair(mode, scope)，"-" 表示未设置 */

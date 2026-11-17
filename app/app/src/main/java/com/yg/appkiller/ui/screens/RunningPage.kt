@@ -18,14 +18,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,15 +32,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
-import com.yg.appkiller.Ctrl
-import com.yg.appkiller.FrozenApp
+import com.yg.appkiller.BgApp
 import com.yg.appkiller.ui.data.DaemonState
 import com.yg.appkiller.ui.util.DshIconSize
 import com.yg.appkiller.ui.util.DshSpacing
 import com.yg.appkiller.ui.util.PageScaffoldColumn
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
@@ -60,24 +51,27 @@ private val GroupTopShape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
 private val GroupBottomShape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp)
 
 /**
- * 运行列表 = 守护进程正在冻结的应用。
+ * 运行列表 = 全部后台应用，已冻结的在上、未冻结的在下。
  *
- * 数据来自应用壳每秒刷新的 [DaemonState]（一份 flow，四个页面共享），
- * 本页不再自己开轮询 —— 早先每页各开一个 tick 协程，四个页面同时跑，
- * 就是「App 界面很卡」的直接原因之一。
+ * 数据来自应用壳每秒刷新的 [DaemonState]（一份 flow，四个页面共享），本页不再自己开轮询。
  *
- * 行内容五槽位（与 skill 的列表项规范一致）：
- * 图标 → 应用名 → 状态短语（冻结时长/剩余）→ 标识（包名）→ 右侧标签（进程数）。
- * 应用名必须用真实 label，不能显示包名尾巴 —— 用户认不出 com.netease.cloudmusic。
+ * 为什么分两段：只有「已冻结」一段时，用户看不出那些后台活着但没被系统冻结的应用 ——
+ * 它们不会被清理，但确实占着内存，是「为什么还这么卡」的答案。
+ *
+ * 段名用「即将去死」而不是「已冻结」：这一段的用户问题是"接下来会发生什么"，
+ * 不是"系统现在把它标成了什么"。冻结是手段，清理才是结果。
  */
 @Composable
 fun RunningPage(
     isBlurEnabled: Boolean,
     bottomPadding: Dp,
     state: DaemonState,
-    onEntryClick: (FrozenApp, String) -> Unit,
+    onEntryClick: (String, String) -> Unit,
 ) {
-    val apps = state.watching
+    val all = state.background
+    val frozen = remember(all) { all.filter { it.frozen } }
+    val others = remember(all) { all.filter { !it.frozen } }
+
     PageScaffoldColumn(title = "运行列表", isBlurEnabled = isBlurEnabled) { innerPadding ->
         // 顶部 inset 在这里吃一次；列表的 contentPadding 不再重复算，否则上方会空一大块
         Column(
@@ -85,17 +79,14 @@ fun RunningPage(
                 .fillMaxSize()
                 .padding(top = innerPadding.calculateTopPadding()),
         ) {
-            SmallTitle(
-                text = if (apps.isEmpty()) "准备去死 · 0"
-                else "准备去死 · " + apps.size,
-            )
+            SmallTitle(text = "后台应用 · " + all.size)
             Box(modifier = Modifier.weight(1f)) {
                 RunningBody(
                     loaded = state.loaded,
                     running = state.running,
-                    apps = apps,
-                    labels = rememberAppLabels(apps),
-                    topPadding = 0.dp,
+                    frozen = frozen,
+                    others = others,
+                    labels = rememberAppLabels(all),
                     bottomPadding = bottomPadding,
                     onEntryClick = onEntryClick,
                 )
@@ -107,11 +98,11 @@ fun RunningPage(
 /**
  * 包名 → 应用名的映射，随列表变化重算一次。
  *
- * 用 remember(apps) 而不是每次行内查：一轮 20 个应用就是 20 次 pm 调用，
- * 每秒刷一次的话每秒 20 次，主线程直接卡死（这是「运行列表显示错误」那次的教训）。
+ * 用 remember(all) 而不是每次行内查：一轮几十个应用就是几十次 pm 调用，
+ * 每秒刷一次的话主线程直接卡死（这是「运行列表显示错误」那次的教训）。
  */
 @Composable
-private fun rememberAppLabels(apps: List<FrozenApp>): Map<String, String> {
+private fun rememberAppLabels(apps: List<BgApp>): Map<String, String> {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     return remember(apps) {
         val pm = ctx.packageManager
@@ -139,37 +130,52 @@ private fun rememberAppIcon(pkg: String): ImageBitmap? {
 private fun RunningBody(
     loaded: Boolean,
     running: Boolean,
-    apps: List<FrozenApp>,
+    frozen: List<BgApp>,
+    others: List<BgApp>,
     labels: Map<String, String>,
-    topPadding: Dp,
     bottomPadding: Dp,
-    onEntryClick: (FrozenApp, String) -> Unit,
+    onEntryClick: (String, String) -> Unit,
 ) {
     AnimatedVisibility(visible = loaded, enter = fadeIn(), exit = fadeOut()) {
-        if (apps.isEmpty()) {
+        if (frozen.isEmpty() && others.isEmpty()) {
             RunningEmptyHint(running = running, bottomPadding = bottomPadding)
         } else {
             LazyColumn(
-                contentPadding = PaddingValues(
-                    top = topPadding,
-                    bottom = bottomPadding + DshSpacing.Block,
-                ),
+                contentPadding = PaddingValues(bottom = bottomPadding + DshSpacing.Block),
             ) {
-                itemsIndexed(
-                    items = apps,
-                    key = { _, app -> app.pkg },
-                ) { index, app ->
-                    val label = labels[app.pkg] ?: app.pkg
-                    RunningRow(
-                        app = app,
-                        label = label,
-                        isFirst = index == 0,
-                        isLast = index == apps.lastIndex,
-                        isOnly = apps.size == 1,
-                        // 名称一起传出去：二级页要显示「微信」而不是「com.tencent.mm」，
-                        // 而它自己只有一个包名，查名要再走一次 pm。
-                        onClick = { onEntryClick(app, label) },
-                    )
+                if (frozen.isNotEmpty()) {
+                    item(key = "h-frozen") {
+                        SmallTitle(text = "即将去死 · " + frozen.size)
+                    }
+                    items(frozen.size, key = { "f-" + frozen[it].pkg }) { i ->
+                        val app = frozen[i]
+                        val label = labels[app.pkg] ?: app.pkg
+                        BgRow(
+                            app = app,
+                            label = label,
+                            isFirst = i == 0,
+                            isLast = i == frozen.lastIndex,
+                            isOnly = frozen.size == 1,
+                            onClick = { onEntryClick(app.pkg, label) },
+                        )
+                    }
+                }
+                if (others.isNotEmpty()) {
+                    item(key = "h-others") {
+                        SmallTitle(text = "未冻结 · " + others.size)
+                    }
+                    items(others.size, key = { "o-" + others[it].pkg }) { i ->
+                        val app = others[i]
+                        val label = labels[app.pkg] ?: app.pkg
+                        BgRow(
+                            app = app,
+                            label = label,
+                            isFirst = i == 0,
+                            isLast = i == others.lastIndex,
+                            isOnly = others.size == 1,
+                            onClick = { onEntryClick(app.pkg, label) },
+                        )
+                    }
                 }
             }
         }
@@ -183,8 +189,8 @@ private fun RunningBody(
 }
 
 @Composable
-private fun RunningRow(
-    app: FrozenApp,
+private fun BgRow(
+    app: BgApp,
     label: String,
     isFirst: Boolean,
     isLast: Boolean,
@@ -200,7 +206,7 @@ private fun RunningRow(
             showIndication = true,
             onClick = onClick,
         ) {
-            RunningRowContent(app, label)
+            BgRowContent(app, label)
         }
         return
     }
@@ -218,12 +224,12 @@ private fun RunningRow(
             .background(colorScheme.surfaceContainer, shape)
             .clickable(onClick = onClick),
     ) {
-        RunningRowContent(app, label)
+        BgRowContent(app, label)
     }
 }
 
 @Composable
-private fun RunningRowContent(app: FrozenApp, label: String) {
+private fun BgRowContent(app: BgApp, label: String) {
     val icon = rememberAppIcon(app.pkg)
     Row(
         modifier = Modifier
@@ -246,11 +252,11 @@ private fun RunningRowContent(app: FrozenApp, label: String) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            // subtitle 是状态短语，一句话说清「现在怎么样」：
-            // 冻结了多久、还剩多久。这两个数每秒都在变，所以它必须是主行下面第一行。
+            // subtitle 是状态短语：冻结了多久、还剩多久；未冻结的直接说明为什么不会被清
             MiuixText(
-                text = "已冻结 " + durationText(app.frozenSec) +
-                    " · 剩余 " + durationText(app.remainSec),
+                text = if (app.frozen)
+                    "已冻结 " + durationText(app.frozenSec) + " · 剩余 " + durationText(app.remainSec)
+                else "未冻结 · 系统尚未回收，不参与清理",
                 style = MiuixTheme.textStyles.body2,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -268,7 +274,7 @@ private fun RunningRowContent(app: FrozenApp, label: String) {
         StatusTag(
             TagSpec(
                 label = app.frozenProcs.toString() + "/" + app.totalProcs + " 进程",
-                background = if (app.frozenProcs > 0) Color(60, 179, 113) else Color(0xFF9E9E9E),
+                background = if (app.frozen) Color(60, 179, 113) else Color(0xFF9E9E9E),
                 contentColor = Color.White,
             ),
         )
@@ -284,7 +290,7 @@ private fun durationText(sec: Long): String = when {
 }
 
 /**
- * 空态分三种：还没读到 / 守护没在跑 / 跑了但没有需要冻结的应用。
+ * 空态分三种：还没读到 / 守护没在跑 / 跑了但没有后台应用。
  *
  * 三句合成一句「暂无数据」是这类页面最常见的偷懒：用户不知道是该去开守护，
  * 还是该去用几个应用，还是该等一会儿。
@@ -297,13 +303,13 @@ private fun RunningEmptyHint(running: Boolean, bottomPadding: Dp) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             MiuixText(
-                text = if (running) "暂时没有需要杀死的应用" else "守护进程未运行",
+                text = if (running) "当前没有后台应用" else "守护进程未运行",
                 fontSize = MiuixTheme.textStyles.body2.fontSize,
                 color = colorScheme.onSurfaceVariantSummary,
             )
             Spacer(Modifier.size(DshSpacing.Compact))
             MiuixText(
-                text = if (running) "应用退到后台超过设定时间后会出现在这里"
+                text = if (running) "应用退到后台后会出现在这里"
                 else "去设置页点「启动守护」",
                 fontSize = MiuixTheme.textStyles.footnote1.fontSize,
                 color = colorScheme.onSurfaceVariantSummary,

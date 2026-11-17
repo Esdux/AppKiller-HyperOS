@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.yg.appkiller.AppRepo
 import com.yg.appkiller.ui.AppSettings
 import com.yg.appkiller.ui.data.DaemonStateViewModel
 import com.yg.appkiller.ui.screens.AppDetailActivity
@@ -138,6 +139,14 @@ class AppShellActivity : ComponentActivity() {
         // 漏了这一步的后果不是崩溃，而是应用列表永久显示「读取失败」——
         // 因为 appContext 为 null 时 refresh() 直接走 failed 分支。
         AppListViewModel.appContext = applicationContext
+
+        // 系统应用清单同步：daemon 的「系统应用默认豁免」依赖 system_apps.list。
+        // 以前这个函数没有任何调用点，清单永远是空文件，豁免只能靠 daemon 启动时
+        // pm list packages -s 兜底；现在每次冷启动在 IO 线程补一次，写完自动 RELOAD。
+        // 放 IO 线程是因为里面要跑两次 pm 与 400+ 次 getApplicationInfo。
+        Thread {
+            runCatching { AppRepo.syncSystemList(applicationContext) }
+        }.apply { isDaemon = true }.start()
 
         val saved = AppSettings.load(this)
         // 冷启动白闪三件套之一：先用上次绘制到的那层颜色涂窗口。
@@ -308,13 +317,13 @@ fun AppShellScreen(
                         isBlurEnabled = isBlurEnabled,
                         bottomPadding = navBarHeight,
                         state = state,
-                        onEntryClick = { frozen, label ->
+                        onEntryClick = { pkg, label ->
                             // 运行列表里点一行，进的是同一个二级页：
                             // 用户想知道「为什么它在冻」，那里才有清理方式与进程明细。
                             // 名称必须用列表已经解析好的 label —— 早先这里传的是 frozen.pkg，
                             // 二级页标题就成了包名。
                             context.startActivity(
-                                AppDetailActivity.intent(context, frozen.pkg, label),
+                                AppDetailActivity.intent(context, pkg, label),
                             )
                         },
                     )

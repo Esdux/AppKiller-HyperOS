@@ -41,10 +41,12 @@ HyperOS（澎湃 OS）的 greeze 与 AOSP 的 freezer 不是一回事：
 3. **白名单** `protect.list` → 豁免。**整份沿用 Cirno 的 `CommonConstants.whiteApps`**（约 90 条，含中文注释：小米/OPPO/一加/真我/三星/谷歌系与各家 Magisk 管理器）
 4. **当前输入法** → 豁免（Cirno 的 `FreezeExemption.INPUT`；杀掉正在用的输入法会让用户当场打不出字）。daemon 用 `settings get secure default_input_method` 取包名，随配置热重载刷新
 5. **persistent 应用** `immortal.list` → 豁免（`android:persistent=true`，杀了系统会立刻拉起，清理只是白费 cpu）
-6. **系统应用** `system_apps.list` → 按 `SYSTEM_DEFAULT`（默认 `protect`，即**整体豁免**，与 Cirno 的 `FreezeExemption.SYSTEM` 一致）
+6. **系统应用** → 按 `SYSTEM_DEFAULT`（默认 `protect`，即**整体豁免**，与 Cirno 的 `FreezeExemption.SYSTEM` 一致）。判定三路取并集，任一路命中即算系统应用：① 运行时 `uid < 10000`（等价 Cirno 的 `ApplicationInfo.uid < Process.FIRST_APPLICATION_UID`，直接读 `/proc/<pid>` 属主 uid，**不依赖任何清单文件**）；② 命中 App 生成的 `system_apps.list`；③ 命中 daemon 启动时 `pm list packages -s` 的兜底结果
 7. **普通应用** → 按 `USER_DEFAULT`（默认 `manage`，即默认纳入清理）
 
-`system_apps.list` 与 `immortal.list` 由管理器 App 用 `pm list packages` + `PackageManager` 生成；清单为空时 daemon 会自己跑一次 `pm list packages -s` 兜底（HyperOS 4 上 `QUERY_ALL_PACKAGES` 并不保证 PackageManager 能枚举全量，必须以 pm 输出为准）。
+`system_apps.list` 与 `immortal.list` 由管理器 App 在冷启动时于 IO 线程生成并触发 RELOAD。系统应用的判定不能只看 `getApplicationInfo(pkg).flags`：HyperOS 4 上包可见性受限时它返回 null，flags 与 sourceDir 全为空，系统应用会被误判成普通应用 —— 一旦按误判结果写进清单，daemon 的系统豁免就形同虚设。所以 App 侧也取三路并集：`pm list packages -s` 的直接输出、`ApplicationInfo.uid < 10000`、`FLAG_SYSTEM` 或安装路径不在 `/data` 下。
+
+清单为空时 daemon 仍会自己跑一次 `pm list packages -s` 兜底（HyperOS 4 上 `QUERY_ALL_PACKAGES` 并不保证 PackageManager 能枚举全量，必须以 pm 输出为准）。
 
 想清理某个被豁免的系统应用，把它写进 `blacklist.list`：黑名单优先级高于系统应用豁免。
 
@@ -82,7 +84,7 @@ appkiller-hyperos/
 | --- | --- |
 | **主页** | 状态卡三档配色（守护中 / 未运行 / 无 root）+ 守护状态、已运行、已杀死、白名单数、黑名单数五条数据 + 设备型号 / 系统版本 |
 | **应用** | 447 项全量应用列表：58dp 图标 / 应用名 / 包名 / 系统标签；搜索 + 右上角筛选弹层（分类单选 + 白名单/黑名单多选并集），点进二级页 |
-| **运行列表** | 只列「已冻结且正在计时」的应用：图标 / 名称 / 已冻结时长 + 剩余时间 / 包名 / `已冻结/总` 进程标签 |
+| **运行列表** | 全部后台应用，分两段。上段「即将去死」= 已冻结且正在计时：图标 / 名称 / 已冻结时长 + 剩余时间 / 包名 / `已冻结/总` 进程标签；下段「未冻结」= 系统尚未回收、不参与清理，也一并列出（否则「为什么还这么卡」没有答案） |
 | **设置** | 守护进程（状态 / 启用开关 / 重启）、清理规则（后台超时 / 清理方式 / 仅演练）、界面（主题与外观）、配置备份（导出 / 导入 / 导入 Cirno 名单）、日志、危险操作 |
 
 ### 二级页
