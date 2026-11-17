@@ -55,57 +55,65 @@ appkiller-hyperos/
 ├── src/appkillerd.c       守护进程（单文件）
 ├── src/appkillerd.h       配置结构与函数声明
 ├── module/                KernelSU / Magisk 模块
-│   ├── module.prop        v1.1 / versionCode 2
+│   ├── module.prop        v1.3 / versionCode 13
 │   ├── config.conf        全部可调参数（热重载）
 │   ├── protect.list       Cirno 默认白名单
 │   ├── blacklist.list     黑名单
-│   ├── service.sh         开机启动 + 首次自动装管理器 APK
+│   ├── service.sh         开机启动（管理器 APK 在刷入时已装）
 │   ├── action.sh          模块管理器「执行」按钮入口
 │   ├── webroot/           KernelSU WebUI 页面
 │   └── bin/               appkillerd + appkiller.apk
-├── app/                   管理器 App（Kotlin + Compose + Miuix + Cirno 界面壳）
-│   └── app/src/main/java/com/yg/appkiller/   四页 + ui/（壳、组件、工具）
-├── build.sh               编译 daemon + 打包模块 zip
+├── app/                   管理器 App（Kotlin + Compose + Miuix，按 miuix-compose-ui skill 模板搭建）
+│   └── app/src/main/java/com/yg/appkiller/   四页 + ui/（壳、页面、数据层、工具）
+├── out/appkillerd         daemon 编译产物
+└── dist/                  模块 zip
 └── LICENSE                GPL-3.0
 ```
 
 ## 管理器 App
 
-界面层**直接搬自 [Cirno](https://github.com/Adkimsm/Cirno) 的 Compose 壳**（横向分页 + CirnoCard + 壁纸模糊），底栏用 [VCut Lower](https://github.com/zyl6932/vcut) 同源的**液态玻璃悬浮导航栏**（`IosLiquidGlassNavigationBar`：胶囊容器 + 折射透镜 + 可拖拽指示器，HyperNavBar / Kyant0 AndroidLiquidGlass 一脉，Apache-2.0），
-组件来自 [Miuix](https://github.com/compose-miuix-ui/miuix) 0.9.4 与 [kyant0/backdrop](https://github.com/Kyant0/backdrop)。
-这套壳已抽成通用框架放在 `tools/compose-cirno-shell/`，可整套复制到别的 Compose 工程。
+界面层按 miuix-compose-ui skill 的模板从零搭建，组件来自 [Miuix](https://github.com/compose-miuix-ui/miuix) 0.9.4；
+页面结构与间距/字号阶梯沿用 skill 的 DesignTokens（2/4/8/12/16dp 五档间距、MiuixTheme.textStyles 全部字号），
+卡片分组语义照 [Cirno](https://github.com/Adkimsm/Cirno)，底栏两态（贴底 NavigationBar / 悬浮 FloatingNavigationBar + 纹理模糊）。
 
-四页：
+四个标签：
 
-| 页 | 内容 |
+| 标签 | 内容 |
 | --- | --- |
-| **主界面** | 守护进程状态（绿/红点 + pid）、清理阈值、清理方式与范围、冻结判定方式、运行时长、启动/重启与停止按钮、统计（正在计时数、被冻结进程数、最久冻结、累计清理） |
-| **运行列表** | 只列当前真正「被冻结且正在计时」的应用：应用名 / 包名 / 剩余秒数 / 冻结进度条 / 冻结 x/y 进程 · 已冻结秒数 / 已清理次数，可搜索 |
-| **应用列表** | 单开关列表：**开关开启 = 白名单，关闭 = 参与清理**（Cirno 的 `white_app` 语义）。顶部三档（全部 / 白名单 / 系统），可搜索，底部「保存并重载」写盘并触发 daemon 重载 |
-| **设置** | 总开关、观察模式、调试日志、阈值、扫描间隔、清理方式与范围、默认策略、节流参数、日志尾部 |
+| **主页** | 状态卡三档配色（守护中 / 未运行 / 无 root）+ 守护状态、已运行、已杀死、白名单数、黑名单数五条数据 + 设备型号 / 系统版本 |
+| **应用** | 447 项全量应用列表：58dp 图标 / 应用名 / 包名 / 系统标签；搜索 + 右上角筛选弹层（分类单选 + 白名单/黑名单多选并集），点进二级页 |
+| **运行列表** | 只列「已冻结且正在计时」的应用：图标 / 名称 / 已冻结时长 + 剩余时间 / 包名 / `已冻结/总` 进程标签 |
+| **设置** | 守护进程（状态 / 启用开关 / 重启）、清理规则（后台超时 / 清理方式 / 仅演练）、界面（主题与外观）、配置备份（导出 / 导入 / 导入 Cirno 名单）、日志、危险操作 |
 
-开关语义速记：**应用列表里打开开关，就是把该应用加入白名单，它永远不会被清理；关掉就按黑名单 / persistent / 系统应用 / 默认策略继续判定。**
+### 二级页
 
-### 界面层结构（`app/app/src/main/java/com/yg/appkiller/`）
+`AppDetailActivity` 六组：身份行（72dp 图标 + 名称 + 包名）→ 名单（白 / 黑 SwitchPreference，互斥写盘）→
+清理方式（per-app 下拉：跟随全局 / sigkill / am kill / force stop）→ 当前进程（每 2s 刷新，逐进程可单独设
+跟随应用 / sigkill / am kill / force stop / 跳过不清理，点击立即按该档清理）→ 系统（跳系统应用信息）→ 危险操作（立即清理）。
+
+### 代码结构（`app/app/src/main/java/com/yg/appkiller/`）
 
 | 位置 | 说明 |
 | --- | --- |
-| `MainActivity.kt` | 入口：`AppRoot` → 主题 → `AppState` → `MiuixBackground` → `AppContent` |
-| `ui/app/AppContent.kt` | 壳：`HorizontalPager` + `IosLiquidGlassNavigationBar`（4 个 tab，图标 + 文字，指示器可拖拽切页） |
-| `ui/custom/liquid/*` | 液态玻璃底栏五件：`LiquidGlassNavigationBar` + `Vibrancy` / `Lens` / `InnerShadow` / `CombinedBackdrop` |
-| `ui/app/AppState.kt` / `Theme.kt` | 全局界面状态（模糊、分页滑动、回弹、圆角）与 Miuix 主题控制 |
-| `ui/PageKit.kt` | `CirnoPage`：`AdaptiveTopAppBar` + `LazyColumn` + 给浮动底栏预留的 150dp 底部留白 |
-| `ui/utils/*` | `PageUtils`（滚动修饰/顶栏/纹理模糊）、`CirnoCard`、`BackgroundManager`（壁纸）、`MiuixBackground` |
-| `ui/custom/*` | `FloatingBottomBar`、`DampedDragAnimation`、`InteractiveHighlight`（AGSL 高光）、`DragGestureInspector` |
-| `StatusPage` / `RunningPage` / `AppListPage` / `SettingsPage` | 四页业务内容；设置页含「配置备份」组：导出配置 / 导入配置 / 导入 Cirno 白名单（读 Cirno 的 `ApplicationSettings.json`，把 `whiteApps` / `blackApps` 并入本模块名单） |
+| `ui/AppShellActivity.kt` / `AppShell.kt` | 入口与四标签壳：`HorizontalPager`（`beyondViewportPageCount = 1`）+ 两态底栏 |
+| `ui/util/PageScaffold.kt` | 页面骨架：`Scaffold` + `contentWindowInsets`（只取左右）+ `BlurredBar` 顶栏 + `LazyColumn` |
+| `ui/util/BlurUtils.kt` | 渐进模糊顶栏（`progressiveTextureBlur` + `TopBarBlurConfig`）与 `rememberBlurBackdrop` |
+| `ui/util/DesignTokens.kt` / `CardSpacing.kt` | 间距阶梯与卡片边距（`firstCard()` / `nextCard()`） |
+| `ui/theme/MiuixAppTheme.kt` | 主题、动态取色、深浅色判定 |
+| `ui/data/DaemonStateViewModel.kt` | 1s 轮询的守护状态流（`flowOn(Dispatchers.IO)` + `stateIn(WhileSubscribed)`） |
+| `ui/screens/HomePage.kt` / `AppListPage.kt` / `RunningPage.kt` / `SettingsPage.kt` | 四页 |
+| `ui/screens/AppListViewModel.kt` | 双流派生（全量 + 搜索词 + 分类 + 白/黑两布尔取并集），图标解码走 LRU（400 项） |
+| `ui/screens/AppDetailActivity.kt` / `ThemeActivity.kt` / `CirnoImportDialog.kt` | 二级页、主题页、Cirno 名单候选框 |
+| `Ctrl.kt` / `Repos.kt` | 数据通道：控制端口协议封装 + root 直读文件 |
 
-minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求），页面底部统一留 150dp 给浮动底栏。
+minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求）。
 
 数据通道双路：
 
-- **root 通道（首选）**：一次 `su` 批量读完 `run/state.json` + `config.conf` + 三份名单；写文件用 `base64 -d` 绕开 shell 转义
-- **本地控制通道（兜底）**：daemon 监听 `127.0.0.1:27183`，单行协议 `AK1 appkiller <CMD>`，支持 `PING / STATUS / CFG / LOG / LIST / SETLIST / SETKV / RELOAD / KILLPKG`。没拿到 root 时自动走这条
+- **本地控制通道（首选）**：daemon 监听 `127.0.0.1:27183`，单行协议 `AK1 appkiller <CMD>`，支持 `PING / STATUS / CFG / LOG / LIST / SETLIST / SETKV / RELOAD / KILLPKG / PROCS / KILLPID / GETPERAPP / SETPERAPP / GETPERPROC / SETPERPROC`
+- **root 通道（兜底）**：一次 `su` 批量读 `run/state.json` + `config.conf` + 四份名单；写文件用 `base64 -d` 绕开 shell 转义
 
+控制端口优先的原因：每 2s 轮询都 fork 一次 `su` 读 5 个文件（含 330 行 `system_apps.list`）会拖卡主线程，实测是列表卡顿主因。
 ## 配置项
 
 改完不用重启（下一轮热重载），也可 `sh /data/adb/modules/appkiller/action.sh reload`。
@@ -115,7 +123,7 @@ minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求），页面�
 | `ENABLE` | 1 | 总开关 |
 | `TIMEOUT_MIN` | 30 | 冻结多少分钟后清理，可写小数（0.5 = 30 秒） |
 | `INTERVAL_MS` | 2000 | 扫描间隔（最小 200） |
-| `KILL_MODE` | sigkill | `sigkill` / `am_kill` / `force_stop` |
+| `KILL_MODE` | sigkill | 全局默认清理方式：`sigkill` / `am_kill` / `force_stop`，可被 per-app / per-proc 覆盖 |
 | `KILL_SCOPE` | pkg | `pkg` 整个应用 / `frozen` 只清被冻结的进程 |
 | `DRY_RUN` | 0 | 1 = 只记日志不杀 |
 | `ACTIVE_ADJ` | 200 | 低于此 adj 视为可见，立刻重置计时 |
@@ -129,11 +137,14 @@ minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求），页面�
 | `USER_DEFAULT` | manage | 普通应用默认策略 |
 | `CTL_PORT` | 27183 | 本地控制端口，0 = 关闭 |
 
+per-app 覆盖写在 `perapp.conf`（`<包名> <mode> <scope>`），per-proc 覆盖写在 `perproc.conf`（`<进程名> <mode>`，进程名即 `cmdline`）。
+两处 mode 都取 `sigkill` / `am_kill` / `force_stop`，per-proc 另多一个 `skip`（跳过不清理）；空或 `follow` 表示跟随上一级。
+
 ## 安装
 
-1. KernelSU / Magisk 管理器刷入 `dist/appkiller-v1.2.zip`
+1. KernelSU / Magisk 管理器刷入 `dist/appkiller-v1.3.zip`（管理器 APK 在刷入阶段就装好，不必等开机）
 2. 重启（或 `sh /data/adb/modules/appkiller/action.sh start`）
-3. 开机后模块自动安装管理器 App；也可从 KernelSU 打开 WebUI
+3. 若刷入时 `pm` 不可用（recovery 环境），标记会在下次开机由 `service.sh` 补装一次；也可从 KernelSU 打开 WebUI
 4. 首次进 App 会弹一次 KernelSU 授权，允许后名单与状态才能直读；不授权时走本地控制端口，功能仍在
 
 上手建议先 `DRY_RUN=1` 跑一天，确认判定符合预期再关掉。
@@ -141,12 +152,19 @@ minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求），页面�
 ## 构建
 
 ```sh
-./build.sh                      # 守护进程 + 模块 zip
+# 守护进程
+CC=/path/to/ndk/aarch64-linux-android26-clang \
+  "$CC" -O2 -Wall -Wextra -Wno-unused-parameter -o out/appkillerd src/appkillerd.c
 
+# 管理器 APK（release 开 R8，首次约 14 分钟）
 cd app
 JAVA_HOME=/path/to/jdk21 ANDROID_HOME=/path/to/android-sdk \
-  gradle :app:assembleDebug     # 管理器 APK
+  gradle :app:assembleRelease
 ```
+
+release 开了 `isMinifyEnabled` + `isShrinkResources` + `abiFilters arm64-v8a`，APK 从 81.5 MB 压到 **6.6 MB**。
+`proguard-rules.pro` 必须保留 `@Composable` 方法、`androidx.compose.runtime.**`、`top.yukonga.miuix.kmp.icon.**`
+与 blur/shader 的 `<fields>`（AGSL uniform 按字符串索引），否则界面会空白或模糊失效。
 
 主要依赖：`compose-bom 2026.08.00`、`activity-compose 1.13.0`、`top.yukonga.miuix.kmp:{miuix-ui, miuix-icons, miuix-preference, miuix-blur, miuix-shader}:0.9.4`、
 `io.github.kyant0:backdrop:1.0.6`、`androidx.compose.material3:{material3, material3-window-size-class}`。
