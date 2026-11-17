@@ -68,7 +68,16 @@ class AppDetailActivity : ComponentActivity() {
         val pkg = intent.getStringExtra("pkg") ?: ""
         val label = intent.getStringExtra("label") ?: pkg
         setContent {
-            var appState by remember { mutableStateOf(AppState(liquidGlass = UiPrefs.liquidGlass(this))) }
+            var appState by remember {
+            mutableStateOf(
+                AppState(
+                    liquidGlass = UiPrefs.liquidGlass(this),
+                    colorMode = UiPrefs.colorMode(this),
+                    blur = UiPrefs.blur(this) && top.yukonga.miuix.kmp.shader.isRenderEffectSupported(),
+                    enableScrollEndHaptic = UiPrefs.haptic(this),
+                )
+            )
+        }
             AppTheme(
                 uiStyle = appState.uiStyle,
                 colorMode = appState.colorMode,
@@ -156,13 +165,7 @@ private fun AppDetailScreen(pkg: String, label: String, onBack: () -> Unit) {
         },
     ) { innerPadding ->
         val lazyListState = rememberLazyListState()
-        val contentPadding = pageContentPadding(innerPadding, innerPadding, false)
-        val listPadding = PaddingValues(
-            start = contentPadding.calculateStartPadding(androidx.compose.ui.unit.LayoutDirection.Ltr),
-            top = contentPadding.calculateTopPadding(),
-            end = contentPadding.calculateEndPadding(androidx.compose.ui.unit.LayoutDirection.Ltr),
-            bottom = 48.dp,
-        )
+        val listPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 48.dp)
         androidx.compose.foundation.layout.Box(
             modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier
         ) {
@@ -172,7 +175,7 @@ private fun AppDetailScreen(pkg: String, label: String, onBack: () -> Unit) {
                     .fillMaxSize()
                     .pageScrollModifiers(appState.enableScrollEndHaptic, true, scrollBehavior),
                 contentPadding = listPadding,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
                 overscrollEffect = null,
             ) {
                 /* 应用信息 */

@@ -331,7 +331,10 @@ private fun SettingsContent(
                         title = "主题模式",
                         items = listOf("跟随系统", "浅色", "深色", "莫奈跟随系统", "莫奈浅色", "莫奈深色"),
                         selectedIndex = appState.colorMode.coerceIn(0, 5),
-                        onSelectedIndexChange = { updateAppState { s -> s.copy(colorMode = it) } },
+                        onSelectedIndexChange = {
+                                UiPrefs.setColorMode(ctx, it)
+                                updateAppState { s -> s.copy(colorMode = it) }
+                            },
                     )
                     SwitchPreference(
                         title = "液态玻璃效果",
@@ -346,7 +349,10 @@ private fun SettingsContent(
                         title = "背景模糊",
                         summary = "页面内容接入毛玻璃背景",
                         checked = appState.blur,
-                        onCheckedChange = { on -> updateAppState { s -> s.copy(blur = on) } },
+                        onCheckedChange = { on ->
+                            UiPrefs.setBlur(ctx, on)
+                            updateAppState { s -> s.copy(blur = on) }
+                        },
                     )
                     ArrowPreference(
                         title = "自定义背景图",
@@ -363,7 +369,10 @@ private fun SettingsContent(
                         title = "末尾触感反馈",
                         summary = "滚动到边界时轻微震动",
                         checked = appState.enableScrollEndHaptic,
-                        onCheckedChange = { on -> updateAppState { s -> s.copy(enableScrollEndHaptic = on) } },
+                        onCheckedChange = { on ->
+                            UiPrefs.setHaptic(ctx, on)
+                            updateAppState { s -> s.copy(enableScrollEndHaptic = on) }
+                        },
                     )
                 }
             }

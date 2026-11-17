@@ -296,7 +296,10 @@ int protect_load(const char *moddir) {
 }
 
 /* ---- 名单：白名单 / 黑名单 / 系统应用表 ---- */
-static int pkg_in_list(char (*list)[PKG_LEN], int n, const char *pkg) {
+
+/* 名单命中（策略用）：精确 / '*' 通配 / 子进程前缀
+ * cmdline 的冒号进程 com.a.b:xx 经 normalize 为 com.a.b.xx，策略上归属主包 com.a.b */
+static int pkg_in_list2(char (*list)[PKG_LEN], int n, const char *pkg) {
     if (!pkg || !*pkg) return 0;
     for (int i = 0; i < n; i++) {
         size_t len = strlen(list[i]);
@@ -305,8 +308,20 @@ static int pkg_in_list(char (*list)[PKG_LEN], int n, const char *pkg) {
             if (strncmp(pkg, list[i], len - 1) == 0) return 1;
         } else if (strcmp(pkg, list[i]) == 0) {
             return 1;
+        } else if (strncmp(pkg, list[i], len) == 0 && pkg[len] == '.') {
+            return 1;
         }
     }
+    return 0;
+}
+
+/* 目标包与进程归一名的匹配：精确或互为子进程前缀（杀/复查用） */
+static int pkg_proc_match(const char *target, const char *proc_pkg) {
+    if (!target || !*target || !proc_pkg || !*proc_pkg) return 0;
+    if (strcmp(target, proc_pkg) == 0) return 1;
+    size_t lt = strlen(target), lp = strlen(proc_pkg);
+    if (lt < lp && strncmp(target, proc_pkg, lt) == 0 && proc_pkg[lt] == '.') return 1;
+    if (lp < lt && strncmp(proc_pkg, target, lp) == 0 && target[lp] == '.') return 1;
     return 0;
 }
 
@@ -594,13 +609,13 @@ int pkg_is_hard_protected(const char *pkg) {
  */
 int pkg_should_manage(const char *pkg) {
     if (pkg_is_hard_protected(pkg)) return 0;
-    if (pkg_in_list(g_blacklist, g_blacklist_n, pkg)) return 1;
-    if (pkg_in_list(g_protect, g_protect_n, pkg)) return 0;
+    if (pkg_in_list2(g_blacklist, g_blacklist_n, pkg)) return 1;
+    if (pkg_in_list2(g_protect, g_protect_n, pkg)) return 0;
     /* 当前输入法：杀掉会让用户当场无法输入（Cirno 同样整体豁免） */
     if (g_ime_pkg[0] && strcmp(pkg, g_ime_pkg) == 0) return 0;
     /* persistent 应用：杀不掉，默认豁免（黑名单仍可覆盖） */
-    if (pkg_in_list(g_immortal, g_immortal_n, pkg)) return 0;
-    if (pkg_in_list(g_systemlist, g_systemlist_n, pkg))
+    if (pkg_in_list2(g_immortal, g_immortal_n, pkg)) return 0;
+    if (pkg_in_list2(g_systemlist, g_systemlist_n, pkg))
         return strcmp(g_cfg.system_default, "manage") == 0;
     return strcmp(g_cfg.user_default, "protect") != 0;
 }
@@ -613,6 +628,8 @@ int pkg_is_protected(const char *pkg) {
         if (g_protect[i][n - 1] == '*') {
             if (strncmp(pkg, g_protect[i], n - 1) == 0) return 1;
         } else if (strcmp(pkg, g_protect[i]) == 0) {
+            return 1;
+        } else if (strncmp(pkg, g_protect[i], n) == 0 && pkg[n] == '.') {
             return 1;
         }
     }
@@ -848,6 +865,7 @@ void scan_round(void) {
     closedir(d);
 
     /* 合并到持久表 */
+    for (int i = 0; i < g_pkg_n; i++) g_pkgs[i].seen = 0;
     for (int i = 0; i < sn; i++) {
         pkgent_t *pe = find_pkg(g_pkgs, &g_pkg_n, scan[i].pkg);
         int reset = (scan[i].active > 0) || (scan[i].frozen == 0);
@@ -861,6 +879,7 @@ void scan_round(void) {
             memset(pe, 0, sizeof(*pe));
             snprintf(pe->pkg, PKG_LEN, "%s", scan[i].pkg);
         }
+        pe->seen       = 1;
         pe->frozen     = scan[i].frozen;
         pe->background = scan[i].background;
         pe->active     = scan[i].active;
@@ -872,7 +891,7 @@ void scan_round(void) {
     /* 清理不再计时的条目 */
     int w = 0;
     for (int i = 0; i < g_pkg_n; i++) {
-        if (g_pkgs[i].since == 0) continue;
+        if (g_pkgs[i].since == 0 || !g_pkgs[i].seen) continue;
         if (w != i) g_pkgs[w] = g_pkgs[i];
         w++;
     }
@@ -900,7 +919,7 @@ int pkg_has_visible(const char *pkg) {
         if (raw[0] == '/' || raw[0] == '[') continue;
         char pk[PKG_LEN];
         normalize_pkg(raw, pk, sizeof(pk));
-        if (strcmp(pk, pkg) != 0) continue;
+        if (!pkg_proc_match(pkg, pk)) continue;
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN || adj < 0) continue;
         /* 冻结中的进程不可能在前台：adj 检查只约束未冻结进程 */
@@ -967,7 +986,7 @@ static int sweep_survivors(const char *pkg, const char *scope, int *killed,
         if (raw[0] == '/') continue;
         char pk[PKG_LEN];
         normalize_pkg(raw, pk, sizeof(pk));
-        if (strcmp(pk, pkg) != 0) continue;
+        if (!pkg_proc_match(pkg, pk)) continue;
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN || adj < 0) continue;
         perproc_t *pp = perproc_lookup(raw);
@@ -1034,7 +1053,7 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
 
         char pk[PKG_LEN];
         normalize_pkg(raw, pk, sizeof(pk));
-        if (strcmp(pk, pkg) != 0) continue;
+        if (!pkg_proc_match(pkg, pk)) continue;
 
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN) continue;

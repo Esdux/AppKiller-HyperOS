@@ -65,6 +65,7 @@ typedef struct {
     long long since;       /* 首次观测到冻结的单调时钟秒；0 = 未计时 */
     long long last_kill;
     int       killed_times;
+    int       seen;       /* 本轮扫描是否仍见到该包 */
 } pkgent_t;
 
 typedef struct {

@@ -38,7 +38,16 @@ fun AppRoot() {
             runCatching { BackgroundManager.init(ctx) }
         }
     }
-    var appState by remember { mutableStateOf(AppState(liquidGlass = UiPrefs.liquidGlass(ctx))) }
+    var appState by remember {
+        mutableStateOf(
+            AppState(
+                liquidGlass = UiPrefs.liquidGlass(ctx),
+                colorMode = UiPrefs.colorMode(ctx),
+                blur = UiPrefs.blur(ctx) && top.yukonga.miuix.kmp.shader.isRenderEffectSupported(),
+                enableScrollEndHaptic = UiPrefs.haptic(ctx),
+            )
+        )
+    }
     AppTheme(
         uiStyle = appState.uiStyle,
         colorMode = appState.colorMode,
