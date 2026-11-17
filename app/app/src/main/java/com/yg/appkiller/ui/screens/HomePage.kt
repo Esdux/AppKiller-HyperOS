@@ -70,8 +70,10 @@ fun HomePage(
                 Column {
                     BasicComponent(title = "守护状态", summary = runtimeText(state))
                     BasicComponent(title = "已运行", summary = state.uptimeText)
+                    // watching 是「此刻被系统冻结、正在计时」的集合，不是历史击杀数。
+                    // 写「已杀死」会让人以为这是累计战果，实际它会随着应用被解冻而减少。
                     BasicComponent(
-                        title = "已杀死",
+                        title = "已冻结",
                         summary = if (state.watching.isEmpty()) "无" else state.watching.size.toString() + " 个",
                     )
                     BasicComponent(title = "白名单", summary = state.protectCount.toString() + " 个")
@@ -132,8 +134,8 @@ private fun StatusCard(state: DaemonState, onRefresh: () -> Unit) {
     }
     val subtitle = when {
         !state.loaded -> "正在连接守护进程"
-        ok && state.watching.isNotEmpty() -> "已杀死 " + state.watching.size + " 个应用"
-        ok -> "一切正常，没有需要杀死的应用"
+        ok && state.watching.isNotEmpty() -> "已冻结 " + state.watching.size + " 个应用"
+        ok -> "一切正常，没有冻结中的应用"
         !state.root -> "没有 root 权限，请先在 KernelSU / Magisk 里授权"
         else -> "去设置页点「启动守护」，或检查模块是否已刷入"
     }

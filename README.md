@@ -126,6 +126,16 @@ minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求）。
 | `TIMEOUT_MIN` | 30 | 冻结多少分钟后清理，可写小数（0.5 = 30 秒） |
 | `INTERVAL_MS` | 2000 | 扫描间隔（最小 200） |
 | `KILL_MODE` | sigkill | 全局默认清理方式：`sigkill` / `am_kill` / `force_stop`，可被 per-app / per-proc 覆盖 |
+
+清理的执行顺序是「先整体暂停、再统一杀、最后扫三轮」：
+
+1. 扫一遍整包，把该清理的进程全部 `SIGSTOP` 按住（冻结中的先 `thaw` 再按，因为解冻那一刻它会被立刻调度）；
+2. 逐个 `SIGKILL`，每个进程按它自己的 per-proc 设置收尾 —— 设了 `am_kill` 的先 `SIGCONT` 让它收 `SIGTERM` 走 onDestroy，200ms 后还在再按住断掉；设了 `skip` 的直接放开不动；
+3. 再扫三轮（各间隔 150ms），把 system_server 在这几十毫秒里重新拉起来的也一并按住杀掉。
+
+为什么不边扫边杀：先杀主进程，system_server 会立刻按 ServiceRecord 把 `:push` / `:remote` 拉起来，等扫到它们时已经是新进程了 —— 日志上写着「杀 3 个」，实际还剩 1 个在跑。
+
+`am` 命令必须通过 `sh -c` 调用，不能直接 `execl("/system/bin/am", ...)`：那是个 shell 包装脚本，最终 exec `app_process` 依赖 `ANDROID_DATA` / `ANDROID_ROOT` / `BOOTCLASSPATH`，而 daemon 由 `nohup` 从 `service.sh` 拉起、环境极简，直接 execl 会让 `am` 静默失败（fork 出去的子进程仍 exit 0，看起来像成功了）。
 | `KILL_SCOPE` | pkg | `pkg` 整个应用 / `frozen` 只清被冻结的进程 |
 | `DRY_RUN` | 0 | 1 = 只记日志不杀 |
 | `ACTIVE_ADJ` | 200 | 低于此 adj 视为可见，立刻重置计时 |
