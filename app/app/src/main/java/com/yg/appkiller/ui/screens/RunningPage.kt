@@ -86,8 +86,8 @@ fun RunningPage(
                 .padding(top = innerPadding.calculateTopPadding()),
         ) {
             SmallTitle(
-                text = if (apps.isEmpty()) "已杀死 · 0"
-                else "已杀死 · " + apps.size,
+                text = if (apps.isEmpty()) "准备去死 · 0"
+                else "准备去死 · " + apps.size,
             )
             Box(modifier = Modifier.weight(1f)) {
                 RunningBody(
@@ -249,7 +249,7 @@ private fun RunningRowContent(app: FrozenApp, label: String) {
             // subtitle 是状态短语，一句话说清「现在怎么样」：
             // 冻结了多久、还剩多久。这两个数每秒都在变，所以它必须是主行下面第一行。
             MiuixText(
-                text = "已杀死 " + durationText(app.frozenSec) +
+                text = "已冻结 " + durationText(app.frozenSec) +
                     " · 剩余 " + durationText(app.remainSec),
                 style = MiuixTheme.textStyles.body2,
                 maxLines = 1,
