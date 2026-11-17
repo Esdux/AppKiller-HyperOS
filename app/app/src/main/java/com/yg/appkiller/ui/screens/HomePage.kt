@@ -12,18 +12,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CheckCircleOutline
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.yg.appkiller.R
 import com.yg.appkiller.ui.data.DaemonState
 import com.yg.appkiller.ui.theme.isInDarkTheme
-import com.yg.appkiller.ui.util.DshSpacing
 import com.yg.appkiller.ui.util.PageScaffold
 import com.yg.appkiller.ui.util.firstCard
 import com.yg.appkiller.ui.util.nextCard
@@ -71,7 +71,7 @@ fun HomePage(
                     BasicComponent(title = "守护状态", summary = runtimeText(state))
                     BasicComponent(title = "已运行", summary = state.uptimeText)
                     BasicComponent(
-                        title = "正在冻结",
+                        title = "已杀死",
                         summary = if (state.watching.isEmpty()) "无" else state.watching.size.toString() + " 个",
                     )
                     BasicComponent(title = "白名单", summary = state.protectCount.toString() + " 个")
@@ -132,8 +132,8 @@ private fun StatusCard(state: DaemonState, onRefresh: () -> Unit) {
     }
     val subtitle = when {
         !state.loaded -> "正在连接守护进程"
-        ok && state.watching.isNotEmpty() -> "正在冻结 " + state.watching.size + " 个应用"
-        ok -> "一切正常，没有需要冻结的应用"
+        ok && state.watching.isNotEmpty() -> "已杀死 " + state.watching.size + " 个应用"
+        ok -> "一切正常，没有需要杀死的应用"
         !state.root -> "没有 root 权限，请先在 KernelSU / Magisk 里授权"
         else -> "去设置页点「启动守护」，或检查模块是否已刷入"
     }
@@ -158,17 +158,22 @@ private fun StatusCard(state: DaemonState, onRefresh: () -> Unit) {
                 ) {
                     Icon(
                         modifier = Modifier.size(110.dp),
-                        painter = painterResource(
-                            if (ok) R.drawable.ic_check_circle else R.drawable.ic_error_circle,
-                        ),
+                        // 用 material-icons-extended 的 Rounded 版本，与 HyperMusicCover 是同一个图标。
+                        // 早先为省体积自绘了 ic_check_circle.xml / ic_error_circle.xml，
+                        // 结果勾的包围盒偏心、描边比例不对，怎么调都不如原版 —— 直接用它。
+                        imageVector = if (ok) Icons.Rounded.CheckCircleOutline
+                        else Icons.Rounded.ErrorOutline,
                         tint = iconTint,
                         contentDescription = null,
                     )
                 }
                 // 左下角应用名：状态卡同时也是「我是谁」的位置
                 Box(
+                    // 16 / 10 与 HyperMusicCover 一致，不要改成 DshSpacing.Compact ——
+                    // 应用名要贴底但比卡内边距更靠下一点，8dp 会显得浮起来。
                     modifier = Modifier.fillMaxSize()
-                        .padding(DshSpacing.CardInside, DshSpacing.Compact),
+                        // miuix-check: allow-design-tokens
+                        .padding(16.dp, 10.dp),
                     contentAlignment = Alignment.BottomStart,
                 ) {
                     MiuixText(
@@ -178,8 +183,11 @@ private fun StatusCard(state: DaemonState, onRefresh: () -> Unit) {
                     )
                 }
                 Box(
+                    // 16 / 14 与 HyperMusicCover 一致。这两行是卡的正文，比应用名多 4dp
+                    // 才与下方图标的视觉重心对得上；换成 12dp 标题会往上顶。
                     modifier = Modifier.fillMaxSize()
-                        .padding(DshSpacing.CardInside, DshSpacing.Block),
+                        // miuix-check: allow-design-tokens
+                        .padding(16.dp, 14.dp),
                     contentAlignment = Alignment.TopStart,
                 ) {
                     Column {
@@ -188,9 +196,8 @@ private fun StatusCard(state: DaemonState, onRefresh: () -> Unit) {
                             style = MiuixTheme.textStyles.title3,
                             fontWeight = FontWeight.SemiBold,
                         )
-                        // 2dp：标题与副标题之间只做视觉分离，不用行距。
-                        // 1dp 在低密度屏上会被抹成 0，两行会贴在一起。
-                        Spacer(Modifier.height(2.dp))
+                        // 1dp 与 HyperMusicCover 一致：这里只做视觉分离，不用行距。
+                        Spacer(Modifier.height(1.dp))
                         MiuixText(
                             text = subtitle,
                             style = MiuixTheme.textStyles.body2,

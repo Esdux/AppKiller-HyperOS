@@ -139,21 +139,9 @@ fun SettingsPage(
         }
     }
 
-    val cirnoLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        run {
-            val json = runCatching {
-                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            }.getOrNull()
-            if (json.isNullOrBlank()) return@run "读取失败"
-            val pair = runCatching { ModuleRepo.parseCirnoApps(json) }
-                .getOrElse { return@run "不是 Cirno 的配置格式" }
-            val (w, b) = ModuleRepo.importCirnoSelection(pair.first, pair.second, merge = true)
-            "Cirno 白名单 +" + w + " · 黑名单 +" + b
-        }
-    }
+    // Cirno 名单不再走 SAF 选文件：配置固定写在 /data/system/Cirno/ApplicationSettings.json，
+    // 普通文件选择器根本进不去 /data/system。这里直接读，读完弹候选框让用户勾。
+    var showCirno by remember { mutableStateOf(false) }
 
     PageScaffold(
         title = "设置",
@@ -176,7 +164,7 @@ fun SettingsPage(
                     )
                     SwitchPreference(
                         title = "启用守护",
-                        summary = "关闭后所有应用都不再被冻结与清理",
+                        summary = "关闭后所有应用都不再被杀死与清理",
                         checked = state.running,
                         onCheckedChange = { on ->
                             if (!on) confirmStop = true
@@ -197,13 +185,13 @@ fun SettingsPage(
 
         item(key = "rules") {
             Column {
-                SmallTitle(text = "冻结规则")
+                SmallTitle(text = "清理规则")
                 Card(modifier = Modifier.nextCard()) {
                     WindowDropdownPreference(
                         items = TIMEOUT_STEPS.map { timeoutLabel(it) },
                         selectedIndex = timeoutIndex,
                         title = "后台超时",
-                        summary = "退到后台超过这个时间才冻结",
+                        summary = "退到后台超过这个时间才清理",
                         onSelectedIndexChange = { idx ->
                             run {
                                 ModuleRepo.setConfigs(mapOf("TIMEOUT_MIN" to TIMEOUT_STEPS[idx].toString()))
@@ -267,8 +255,8 @@ fun SettingsPage(
                     )
                     ArrowPreference(
                         title = "导入 Cirno 名单",
-                        summary = "从 Cirno 的 ApplicationSettings.json 并入白/黑名单",
-                        onClick = { cirnoLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
+                        summary = "直接读取 Cirno 的配置，勾选要导入的应用",
+                        onClick = { showCirno = true },
                     )
                 }
                 if (tip.isNotEmpty()) {
@@ -315,7 +303,7 @@ fun SettingsPage(
                     )
                     ArrowPreference(
                         title = "停止守护",
-                        summary = "停止后不再冻结任何应用",
+                        summary = "停止后不再杀死任何应用",
                         onClick = { confirmStop = true },
                     )
                 }
@@ -330,7 +318,7 @@ fun SettingsPage(
     WindowDialog(
         show = confirmStop,
         title = "停止守护进程？",
-        summary = "停止后所有应用都不会再被冻结，直到你重新启动",
+        summary = "停止后所有应用都不会再被杀死，直到你重新启动",
         onDismissRequest = { confirmStop = false },
     ) {
         val dismiss = LocalDismissState.current
@@ -352,6 +340,17 @@ fun SettingsPage(
             )
         }
     }
+
+    CirnoImportDialog(
+        show = showCirno,
+        onDismiss = { showCirno = false },
+        onImported = { msg ->
+            showCirno = false
+            tip = msg
+            // 名单变了，主页与设置页的计数要立刻跟着变，不然用户以为没导进去
+            onRefresh()
+        },
+    )
 
     WindowDialog(
         show = showLog,

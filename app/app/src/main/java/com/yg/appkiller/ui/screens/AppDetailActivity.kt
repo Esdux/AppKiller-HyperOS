@@ -49,6 +49,7 @@ import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text as MiuixText
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.preference.WindowDropdownPreference
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
@@ -92,7 +93,14 @@ class AppDetailActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val pkg = intent.getStringExtra(EXTRA_PKG) ?: return finish()
-        val name = intent.getStringExtra(EXTRA_NAME) ?: pkg
+        // 名称为空或与包名相同，都说明调用方没解析出应用名（运行列表、通知栏跳转等）。
+        // 这里自己查一次兜底：二级页标题显示包名是最容易被投诉的一类「显示错误」。
+        val rawName = intent.getStringExtra(EXTRA_NAME)
+        val name = if (rawName.isNullOrBlank() || rawName == pkg) {
+            runCatching {
+                packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+            }.getOrDefault(pkg)
+        } else rawName
 
         setContent {
             val icon: ImageBitmap? = remember(pkg) {
@@ -131,6 +139,16 @@ class AppDetailActivity : ComponentActivity() {
 
 /** 每应用清理方式的可选项。索引 0 = 跟随全局，与 daemon 的 perapp.conf 语义一致。 */
 private val MODE_LABELS = listOf("跟随全局", "sigkill", "am kill", "force stop")
+
+/**
+ * 单进程的可选项。
+ *
+ * 只有两项，因为 daemon 的 perproc.conf 只认 skip —— 它不实现「单独给某个进程指定
+ * sigkill/am_kill」，那也没意义：一个应用的所有进程要么一起清、要么这个留着。
+ * 真正需要的是「别动这个进程」：推送进程、常驻同步进程被清掉后应用会立刻重连，
+ * 白白多一轮唤醒，跳过它反而更省电。
+ */
+private val PROC_MODE_LABELS = listOf("跟随全局", "跳过不清理")
 
 private fun modeToIndex(mode: String): Int = when (mode) {
     "sigkill" -> 1
@@ -263,7 +281,7 @@ private fun AppDetailContent(
                 Card(modifier = Modifier.firstCard()) {
                     SwitchPreference(
                         title = "白名单",
-                        summary = "白名单内的应用不做任何冻结与清理",
+                        summary = "白名单内的应用不做任何杀死与清理",
                         checked = inWhite,
                         onCheckedChange = { on ->
                             if (on) setMembership(true, false) else setMembership(false, false)
@@ -285,14 +303,14 @@ private fun AppDetailContent(
             Column {
                 SmallTitle(text = "清理方式")
                 Card(modifier = Modifier.nextCard()) {
-                    ArrowPreference(
+                    // 四个互斥选项用下拉弹层，不用「点一次轮换」：
+                    // 轮换看不出有哪几个选项，也回不去上一步，用户会反复点着试。
+                    WindowDropdownPreference(
+                        items = MODE_LABELS,
+                        selectedIndex = modeIndex,
                         title = "此应用的清理方式",
-                        summary = MODE_LABELS[modeIndex],
-                        onClick = {
-                            // 四项互斥、名称都不长 —— 点一次轮换到下一个。
-                            // 平铺四行的代价：占半屏、改一次要点两下，
-                            // 而且「当前是哪个」只能靠某行底下的小字去认。
-                            val next = (modeIndex + 1) % MODE_LABELS.size
+                        summary = "默认跟随全局，可在这里单独覆盖",
+                        onSelectedIndexChange = { next ->
                             modeIndex = next
                             scope.launch {
                                 val ok = withContext(Dispatchers.IO) {
@@ -319,15 +337,28 @@ private fun AppDetailContent(
                         )
                     } else {
                         procs.forEach { p ->
-                            ArrowPreference(
-                                title = p.cmdline.substringAfterLast(':').ifEmpty { p.cmdline },
+                            // 每进程一个下拉：清不清理，细到子进程。
+                            //
+                            // 标题只写进程名，不写包名：一个应用的所有进程包名部分完全相同，
+                            // 每行重复一遍那串长包名，既挤掉真正有区别的信息（push / remote / worker），
+                            // 又会让行高被撑成两行。主进程没有冒号，直接标「主进程」。
+                            val procName = p.cmdline.substringAfterLast(':')
+                                .takeIf { it.isNotEmpty() && it != p.cmdline }
+                                ?: "主进程"
+                            WindowDropdownPreference(
+                                items = PROC_MODE_LABELS,
+                                selectedIndex = if (p.mode == "skip") 1 else 0,
+                                title = procName,
                                 summary = "pid " + p.pid + " · adj " + p.adj +
-                                    (if (p.frozen) " · 已冻结" else "") +
-                                    (if (p.mode.isNotEmpty() && p.mode != "-") " · " + p.mode else ""),
-                                onClick = {
+                                    (if (p.frozen) " · 已杀死" else ""),
+                                onSelectedIndexChange = { idx ->
+                                    val mode = if (idx == 1) "skip" else ""
                                     scope.launch {
-                                        val ok = withContext(Dispatchers.IO) { Ctrl.killPid(p.pid) }
-                                        toast(if (ok) "已发送清理信号" else "清理失败")
+                                        val ok = withContext(Dispatchers.IO) {
+                                            Ctrl.setPerProc(p.cmdline, mode)
+                                        }
+                                        toast(if (ok) "已保存" else "设置失败：守护进程未运行")
+                                        procs = withContext(Dispatchers.IO) { Ctrl.procs(pkg) }
                                     }
                                 },
                             )

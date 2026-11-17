@@ -308,11 +308,13 @@ fun AppShellScreen(
                         isBlurEnabled = isBlurEnabled,
                         bottomPadding = navBarHeight,
                         state = state,
-                        onEntryClick = { frozen ->
+                        onEntryClick = { frozen, label ->
                             // 运行列表里点一行，进的是同一个二级页：
                             // 用户想知道「为什么它在冻」，那里才有清理方式与进程明细。
+                            // 名称必须用列表已经解析好的 label —— 早先这里传的是 frozen.pkg，
+                            // 二级页标题就成了包名。
                             context.startActivity(
-                                AppDetailActivity.intent(context, frozen.pkg, frozen.pkg),
+                                AppDetailActivity.intent(context, frozen.pkg, label),
                             )
                         },
                     )

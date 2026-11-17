@@ -75,7 +75,7 @@ fun RunningPage(
     isBlurEnabled: Boolean,
     bottomPadding: Dp,
     state: DaemonState,
-    onEntryClick: (FrozenApp) -> Unit,
+    onEntryClick: (FrozenApp, String) -> Unit,
 ) {
     val apps = state.watching
     PageScaffoldColumn(title = "运行列表", isBlurEnabled = isBlurEnabled) { innerPadding ->
@@ -86,8 +86,8 @@ fun RunningPage(
                 .padding(top = innerPadding.calculateTopPadding()),
         ) {
             SmallTitle(
-                text = if (apps.isEmpty()) "正在冻结 · 0"
-                else "正在冻结 · " + apps.size,
+                text = if (apps.isEmpty()) "已杀死 · 0"
+                else "已杀死 · " + apps.size,
             )
             Box(modifier = Modifier.weight(1f)) {
                 RunningBody(
@@ -143,7 +143,7 @@ private fun RunningBody(
     labels: Map<String, String>,
     topPadding: Dp,
     bottomPadding: Dp,
-    onEntryClick: (FrozenApp) -> Unit,
+    onEntryClick: (FrozenApp, String) -> Unit,
 ) {
     AnimatedVisibility(visible = loaded, enter = fadeIn(), exit = fadeOut()) {
         if (apps.isEmpty()) {
@@ -159,13 +159,16 @@ private fun RunningBody(
                     items = apps,
                     key = { _, app -> app.pkg },
                 ) { index, app ->
+                    val label = labels[app.pkg] ?: app.pkg
                     RunningRow(
                         app = app,
-                        label = labels[app.pkg] ?: app.pkg,
+                        label = label,
                         isFirst = index == 0,
                         isLast = index == apps.lastIndex,
                         isOnly = apps.size == 1,
-                        onClick = { onEntryClick(app) },
+                        // 名称一起传出去：二级页要显示「微信」而不是「com.tencent.mm」，
+                        // 而它自己只有一个包名，查名要再走一次 pm。
+                        onClick = { onEntryClick(app, label) },
                     )
                 }
             }
@@ -246,7 +249,7 @@ private fun RunningRowContent(app: FrozenApp, label: String) {
             // subtitle 是状态短语，一句话说清「现在怎么样」：
             // 冻结了多久、还剩多久。这两个数每秒都在变，所以它必须是主行下面第一行。
             MiuixText(
-                text = "已冻结 " + durationText(app.frozenSec) +
+                text = "已杀死 " + durationText(app.frozenSec) +
                     " · 剩余 " + durationText(app.remainSec),
                 style = MiuixTheme.textStyles.body2,
                 maxLines = 1,
@@ -294,7 +297,7 @@ private fun RunningEmptyHint(running: Boolean, bottomPadding: Dp) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             MiuixText(
-                text = if (running) "暂时没有需要冻结的应用" else "守护进程未运行",
+                text = if (running) "暂时没有需要杀死的应用" else "守护进程未运行",
                 fontSize = MiuixTheme.textStyles.body2.fontSize,
                 color = colorScheme.onSurfaceVariantSummary,
             )
