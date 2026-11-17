@@ -13,13 +13,27 @@ android {
         applicationId = "com.yg.appkiller"
         minSdk = 33
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 13
+        versionName = "1.3"
+
+        // 只打 arm64-v8a：本模块只面向 HyperOS/MIUI 的 arm64 设备，
+        // 带上 armeabi-v7a / x86 只会让包里多出几十 MB 用不到的 native 库。
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 开起来：debug 81 MB 里九成是 material-icons-extended 与 compose
+            // 的生成代码，裁剪后约 6 MB。保留规则见 proguard-rules.pro，
+            // 少一条就会出现「界面不崩但某行不显示」这类静默失效。
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // 用 debug 签名，模块刷入后由 pm install 直接装，不需要额外配置 keystore
+            signingConfig = signingConfigs.getByName("debug")
         }
         debug {
             isMinifyEnabled = false

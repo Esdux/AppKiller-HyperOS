@@ -141,14 +141,31 @@ class AppDetailActivity : ComponentActivity() {
 private val MODE_LABELS = listOf("跟随全局", "sigkill", "am kill", "force stop")
 
 /**
- * 单进程的可选项。
+ * 单进程的可选项，四档，与 perapp 的三档 + skip 对齐。
  *
- * 只有两项，因为 daemon 的 perproc.conf 只认 skip —— 它不实现「单独给某个进程指定
- * sigkill/am_kill」，那也没意义：一个应用的所有进程要么一起清、要么这个留着。
- * 真正需要的是「别动这个进程」：推送进程、常驻同步进程被清掉后应用会立刻重连，
- * 白白多一轮唤醒，跳过它反而更省电。
+ * 「跟随应用」是默认：这个进程不做任何覆盖，按它所属应用（或全局）的方式清。
+ * 三档清理方式在进程粒度上落在「多强硬」：am kill 先 SIGTERM 留 200ms 收尾，
+ * sigkill 直接断，force stop 杀完再对整包跑一次 am force-stop 防系统拉起。
+ * 「跳过不清理」给推送/同步这类进程用 —— 杀掉它们应用会立刻重连，白多一轮唤醒。
  */
-private val PROC_MODE_LABELS = listOf("跟随全局", "跳过不清理")
+private val PROC_MODE_LABELS = listOf("跟随应用", "sigkill", "am kill", "force stop", "跳过不清理")
+
+/** PROC_MODE_LABELS 下标 → perproc.conf 的 mode 值（"" = 不写配置，跟随应用）。 */
+private fun indexToProcMode(index: Int): String = when (index) {
+    1 -> "sigkill"
+    2 -> "am_kill"
+    3 -> "force_stop"
+    4 -> "skip"
+    else -> ""
+}
+
+private fun procModeToIndex(mode: String): Int = when (mode) {
+    "sigkill" -> 1
+    "am_kill" -> 2
+    "force_stop" -> 3
+    "skip" -> 4
+    else -> 0
+}
 
 private fun modeToIndex(mode: String): Int = when (mode) {
     "sigkill" -> 1
@@ -347,12 +364,12 @@ private fun AppDetailContent(
                                 ?: "主进程"
                             WindowDropdownPreference(
                                 items = PROC_MODE_LABELS,
-                                selectedIndex = if (p.mode == "skip") 1 else 0,
+                                selectedIndex = procModeToIndex(p.mode),
                                 title = procName,
                                 summary = "pid " + p.pid + " · adj " + p.adj +
-                                    (if (p.frozen) " · 已杀死" else ""),
+                                    (if (p.frozen) " · 已冻结" else ""),
                                 onSelectedIndexChange = { idx ->
-                                    val mode = if (idx == 1) "skip" else ""
+                                    val mode = indexToProcMode(idx)
                                     scope.launch {
                                         val ok = withContext(Dispatchers.IO) {
                                             Ctrl.setPerProc(p.cmdline, mode)

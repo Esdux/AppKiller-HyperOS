@@ -86,7 +86,7 @@ typedef struct {
 /* 每进程覆盖配置：按进程名（cmdline）匹配 */
 typedef struct {
     char proc[PKG_LEN];     /* 完整进程名，如 com.tencent.mm:push */
-    char mode[SMALL_LEN];   /* sigkill | skip */
+    char mode[SMALL_LEN];   /* sigkill | am_kill | force_stop | skip */
 } perproc_t;
 
 extern config_t g_cfg;

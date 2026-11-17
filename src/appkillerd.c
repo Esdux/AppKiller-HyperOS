@@ -374,7 +374,7 @@ static int system_list_from_pm(void) {
 
 /* ---- 每应用 / 每进程覆盖配置 ----
  * perapp.conf 行格式:  <包名> mode=<sigkill|am_kill|force_stop> scope=<pkg|frozen>
- * perproc.conf 行格式: <进程名> mode=<sigkill|skip>
+ * perproc.conf 行格式: <进程名> mode=<sigkill|am_kill|force_stop|skip>
  */
 static int valid_mode(const char *m) {
     return !strcmp(m, "sigkill") || !strcmp(m, "am_kill") || !strcmp(m, "force_stop");
@@ -436,7 +436,10 @@ int perproc_load(const char *moddir) {
             if (!strncasecmp(tok, "mode=", 5)) snprintf(mode, sizeof(mode), "%s", tok + 5);
         }
         if (!proc[0] || !mode[0]) continue;
-        if (strcmp(mode, "sigkill") && strcmp(mode, "skip")) continue;
+        /* follow = 跟随应用/全局，等价于没有这条配置，不落表 */
+        if (!strcmp(mode, "follow")) continue;
+        if (strcmp(mode, "sigkill") && strcmp(mode, "am_kill") &&
+            strcmp(mode, "force_stop") && strcmp(mode, "skip")) continue;
         perproc_t *e = &g_perproc[g_perproc_n++];
         snprintf(e->proc, PKG_LEN, "%s", proc);
         snprintf(e->mode, SMALL_LEN, "%s", mode);
@@ -480,7 +483,7 @@ static int perproc_write_all(void) {
     list_path(p, sizeof(p), g_cfg.perproc_file);
     FILE *f = fopen(p, "w");
     if (!f) return -1;
-    fprintf(f, "# 每进程覆盖配置：<进程名> mode=<sigkill|skip>\n");
+    fprintf(f, "# 每进程覆盖配置：<进程名> mode=<sigkill|am_kill|force_stop|skip>\n");
     for (int i = 0; i < g_perproc_n; i++)
         fprintf(f, "%s mode=%s\n", g_perproc[i].proc, g_perproc[i].mode);
     fclose(f);
@@ -523,7 +526,9 @@ int perproc_save(const char *procname, const char *mode) {
         }
         return perproc_write_all();
     }
-    if (strcmp(mode, "sigkill") && strcmp(mode, "skip")) return -1;
+    /* 与 perproc_load 保持同一套合法值，否则写盘成功、重载后被丢弃 */
+    if (strcmp(mode, "sigkill") && strcmp(mode, "am_kill") &&
+        strcmp(mode, "force_stop") && strcmp(mode, "skip")) return -1;
     if (!e) {
         if (g_perproc_n >= MAX_PERPROC) return -1;
         e = &g_perproc[g_perproc_n++];
@@ -970,6 +975,39 @@ static void thaw_pid(int pid) {
     fclose(f);
 }
 
+/* 单进程按 perproc 方式清理。
+ *
+ * 进程粒度能拿到的只有信号，am / force-stop 是包级 API，所以三档的差异落在「多强硬」上：
+ *   sigkill    → thaw + SIGKILL，立刻断，不给应用收尾的机会；
+ *   am_kill    → 先 SIGTERM 给 200ms 收尾，仍活着再 SIGKILL（对应 am kill 的温和语义）；
+ *   force_stop → SIGKILL 之后再对整包跑一次 am force-stop，切断系统层面的重新拉起；
+ *   skip       → 不动。
+ * allow_pkg_cmd = 0 时（sweep 兜底路径）把 force_stop 降级成 sigkill：那里本来就是
+ * 「am 没杀干净」的补救，再调一次 am 只会多绕一圈。
+ * 返回 1 表示确实对这个进程动了手。 */
+static int kill_one_by_mode(int pid, const char *pkg, const char *mode,
+                            int dry_run, int allow_pkg_cmd, int *killed) {
+    if (!mode || !*mode || !strcmp(mode, "skip")) return 0;
+    log_msg("kill pid=%d pkg=%s mode=%s pkgcmd=%d", pid, pkg, mode, allow_pkg_cmd);
+    if (dry_run) { if (killed) (*killed)++; return 1; }
+
+    if (!strcmp(mode, "am_kill")) {
+        thaw_pid(pid);
+        if (kill(pid, SIGTERM) != 0) return 1;
+        usleep(200000);
+        if (kill(pid, 0) == 0) kill(pid, SIGKILL);
+        if (killed) (*killed)++;
+        return 1;
+    }
+
+    thaw_pid(pid);
+    kill(pid, SIGKILL);
+    if (!strcmp(mode, "force_stop") && allow_pkg_cmd && pkg && *pkg)
+        am_command("force-stop", pkg);
+    if (killed) (*killed)++;
+    return 1;
+}
+
 /* am/force-stop 之后兜底：仍活着的后台进程 thaw + SIGKILL */
 static int sweep_survivors(const char *pkg, const char *scope, int *killed,
                            char *pidlist, size_t pidn) {
@@ -989,8 +1027,11 @@ static int sweep_survivors(const char *pkg, const char *scope, int *killed,
         if (!pkg_proc_match(pkg, pk)) continue;
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN || adj < 0) continue;
+        /* 每进程覆盖优先于包级：这里 allow_pkg_cmd=0，force_stop 降级成 sigkill，
+         * 否则「am 没杀干净」的兜底路径会再调一次 am，绕回自己 */
         perproc_t *pp = perproc_lookup(raw);
-        if (pp && !strcmp(pp->mode, "skip")) continue;
+        const char *pm = (pp && pp->mode[0]) ? pp->mode : "sigkill";
+        if (!strcmp(pm, "skip")) continue;
         int state = read_proc_state(pid);
         char cg[PATH_LEN];
         if (read_cgroup(pid, cg, sizeof(cg)) != 0) cg[0] = '\0';
@@ -1007,8 +1048,7 @@ static int sweep_survivors(const char *pkg, const char *scope, int *killed,
                 strncat(pidlist, num, pidn - strlen(pidlist) - 1);
             }
         }
-        thaw_pid(pid);
-        if (kill(pid, SIGKILL) == 0 && killed) (*killed)++;
+        kill_one_by_mode(pid, pkg, pm, 0, 0, killed);
     }
     closedir(d);
     return any;
@@ -1067,9 +1107,10 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
         int frz0 = proc_is_frozen(pid, cg0, st0);
         if (!frz0 && adj < g_cfg.active_adj) continue;   /* 未冻结且可见：绝不动 */
 
-        /* 每进程覆盖：skip = 跳过该进程 */
+        /* 每进程覆盖优先于包级 mode：进程粒度比包粒度细，用户在这里设的就是更具体的意图 */
         perproc_t *pp = perproc_lookup(raw);
-        if (pp && !strcmp(pp->mode, "skip")) continue;
+        const char *pm = (pp && pp->mode[0]) ? pp->mode : mode;
+        if (!strcmp(pm, "skip")) continue;
 
         if (!strcmp(scope, "frozen") && !frz0) continue;
 
@@ -1083,12 +1124,7 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
                 strncat(pidlist, num, pidn - strlen(pidlist) - 1);
             }
         }
-        if (!dry_run) {
-            thaw_pid(pid);
-            if (kill(pid, SIGKILL) == 0 && killed) (*killed)++;
-        } else if (killed) {
-            (*killed)++;
-        }
+        kill_one_by_mode(pid, pkg, pm, dry_run, 1, killed);
     }
     closedir(d);
     return any;
