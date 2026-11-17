@@ -22,6 +22,21 @@ if [ -f "$OLD/blacklist.list" ]; then
     cp -f "$OLD/blacklist.list" "$MODPATH/blacklist.list"
 fi
 
+# 刷入时安装管理器 APK（仅刷入时一次；开机不再补装）
+APKFILE="$MODPATH/bin/appkiller.apk"
+if [ -f "$APKFILE" ]; then
+    ui_print "- 刷入时安装管理器 App: com.yg.appkiller"
+    if pm install -r -g "$APKFILE" >/dev/null 2>&1; then
+        ui_print "- App 安装/更新完成"
+    else
+        # 恢复环境等无 pm 的场合：留一次性标记，首次开机由 service.sh 补装后删除
+        ui_print "! 刷入环境无 pm 或安装失败，标记为首开补装一次"
+        touch "$MODPATH/.pending_apk"
+    fi
+else
+    ui_print "- 模块包未含管理器 APK，跳过 App 安装"
+fi
+
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/bin/appkillerd" 0 0 0755
 set_perm "$MODPATH/service.sh" 0 0 0755

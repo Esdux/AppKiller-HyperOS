@@ -19,11 +19,13 @@ if [ -f "$MODDIR/run/appkillerd.pid" ]; then
     fi
 fi
 
-# 模块内若带有管理器 APK 且尚未安装，静默装上（不影响守护进程启动）
-APKFILE="$MODDIR/bin/appkiller.apk"
-if [ -f "$APKFILE" ]; then
-    if ! pm list packages 2>/dev/null | grep -q '^package:com.yg.appkiller$'; then
-        ( sleep 8; pm install -r -g "$APKFILE" >/dev/null 2>&1 ) &
+# 刷入时 pm 不可用的一次性补装：只认 .pending_apk 标记，装完即删，之后开机不再碰 App
+if [ -f "$MODDIR/.pending_apk" ]; then
+    APKFILE="$MODDIR/bin/appkiller.apk"
+    if [ -f "$APKFILE" ]; then
+        ( sleep 8; pm install -r -g "$APKFILE" >/dev/null 2>&1 && rm -f "$MODDIR/.pending_apk" ) &
+    else
+        rm -f "$MODDIR/.pending_apk"
     fi
 fi
 
