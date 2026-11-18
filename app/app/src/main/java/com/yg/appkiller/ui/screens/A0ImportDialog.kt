@@ -204,7 +204,7 @@ private fun A0GroupHeader(text: String) {
         text = text,
         style = MiuixTheme.textStyles.footnote1,
         color = colorScheme.onSurfaceVariantSummary,
-        modifier = Modifier.fillMaxWidth().padding(top = DshSpacing.Compact, bottom = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = DshSpacing.Compact, bottom = DshSpacing.Tight),
     )
 }
 
@@ -215,7 +215,7 @@ private fun A0Row(
     checked: Boolean,
     onToggle: (Boolean) -> Unit,
 ) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = DshSpacing.Compact)) {
         Column(modifier = Modifier.weight(1f)) {
             MiuixText(text = title, style = MiuixTheme.textStyles.body2)
             MiuixText(
