@@ -299,15 +299,8 @@ object ModuleRepo {
         return if (pid.isNotEmpty()) true to "已热刷入，守护进程 pid " + pid else false to "刷入后守护进程没起来"
     }
 
-    /** 读 A0 后台优化（A0_Memory）的配置；未安装返回 null。位置固定：/sdcard/Android/A0_Memory/config.conf */
-    fun readA0Config(): String? {
-        if (!Shell.rootOk()) return null
-        val raw = Shell.sh("cat /sdcard/Android/A0_Memory/config.conf 2>/dev/null", 10000)
-        return raw.ifBlank { null }
-    }
-
     /**
-     * 解析 A0 配置里的乖巧名单（KILL）与白名单（WHITE）。
+     * 解析 A0 配置里的乖巧名单（KILL）与白名单（WHITE）。配置文本由调用方从用户选中的文件读入。
      *
      * 格式是「行首关键字 + 空格 + 条目」，`#` 开头是注释：
      *   KILL com.tencent.mm:tools      ← 乖巧名单，条目带 :子进程

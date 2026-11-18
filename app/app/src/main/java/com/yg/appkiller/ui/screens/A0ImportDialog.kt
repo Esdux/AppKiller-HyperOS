@@ -37,9 +37,9 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 /**
  * A0 后台优化（A0_Memory）名单导入的候选框。
  *
- * 为什么直接读而不是让用户选文件：A0 的配置固定写在
- * /sdcard/Android/A0_Memory/config.conf，路径不会变。让用户去文件管理器里翻，
- * 等于把「知道路径」这件事外包给用户。
+ * 配置文本由调用方通过文件选择器读进来（[text] 参数），本组件只负责解析与勾选。
+ * 不走固定路径直读：用户可能把配置备份到了别处，也可能改过名字 ——
+ * 让他自己挑文件比猜路径可靠。
  *
  * 格式映射（用户指定，仅用于适配）：
  *   KILL <包名>           → per-app，清理方式 force_stop
@@ -55,6 +55,7 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 @Composable
 fun A0ImportDialog(
     show: Boolean,
+    text: String,
     onDismiss: () -> Unit,
     onImported: (String) -> Unit,
 ) {
@@ -71,17 +72,21 @@ fun A0ImportDialog(
     // 勾选集合：前缀区分三类，避免包名与进程名同名时冲突
     val selected = remember { mutableStateListOf<String>() }
 
-    LaunchedEffect(Unit) {
+    // 只解析一次：text 变化（用户重新选了个文件）才重算。放在 remember(text) 里而不是
+    // LaunchedEffect 里，避免每次重组都把勾选状态清空。
+    LaunchedEffect(text) {
+        loading = true
+        error = ""
+        apps.clear(); procs.clear(); white.clear(); selected.clear()
         val result = withContext(Dispatchers.IO) {
             runCatching {
-                val text = ModuleRepo.readA0Config() ?: return@runCatching null
                 val (a, p, w) = ModuleRepo.parseA0Config(text)
                 if (a.isEmpty() && p.isEmpty() && w.isEmpty()) return@runCatching null
                 Triple(a, p, w)
             }.getOrNull()
         }
         if (result == null) {
-            error = "没读到 A0 配置。请确认已安装 A0 后台优化并至少配置过一次名单。"
+            error = "这个文件里没有 KILL / WHITE 条目。请选 A0 后台优化的 config.conf。"
         } else {
             apps.addAll(result.first)
             procs.addAll(result.second)
