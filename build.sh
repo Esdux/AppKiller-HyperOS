@@ -39,10 +39,8 @@ fi
 
 chmod 0755 "$ROOT/module/bin/appkillerd" \
            "$ROOT/module/service.sh" \
-           "$ROOT/module/action.sh" \
            "$ROOT/module/uninstall.sh" \
            "$ROOT/module/customize.sh" 2>/dev/null || true
-[ -d "$ROOT/module/webroot/cgi-bin" ] && chmod 0755 "$ROOT/module/webroot/cgi-bin/"*.sh 2>/dev/null || true
 
 echo "==> 打包"
 python - "$ROOT" "$VERSION" <<'PY'

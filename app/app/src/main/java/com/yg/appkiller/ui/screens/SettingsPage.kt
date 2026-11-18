@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
@@ -149,9 +150,34 @@ fun SettingsPage(
         }
     }
 
+    // 热刷入：用户挑一个模块 zip，应用自己解压覆盖 + 重启守护进程，不重启整机。
+    // 选 zip 要拿原始文件路径（unzip 在 root shell 里跑，content:// URI 它读不了），
+    // 所以先把选中的 zip 复制到应用缓存目录，再把绝对路径交给 root。
+    val hotInstallLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        run {
+            val zip = runCatching {
+                val f = java.io.File(context.cacheDir, "hot-install.zip")
+                context.contentResolver.openInputStream(uri)?.use { ins ->
+                    f.outputStream().use { outs -> ins.copyTo(outs) }
+                }
+                f
+            }.getOrNull()
+            if (zip == null || !zip.exists() || zip.length() < 1024) return@run "读取 zip 失败"
+            val (ok, msg) = ModuleRepo.hotInstall(zip.absolutePath)
+            zip.delete()
+            if (ok) msg else "热刷入失败：" + msg
+        }
+    }
+
     // Cirno 名单不再走 SAF 选文件：配置固定写在 /data/system/Cirno/ApplicationSettings.json，
     // 普通文件选择器根本进不去 /data/system。这里直接读，读完弹候选框让用户勾。
     var showCirno by remember { mutableStateOf(false) }
+    // A0 后台优化的名单导入：配置固定在 /sdcard/Android/A0_Memory/config.conf，同样直接读。
+    var showA0 by remember { mutableStateOf(false) }
+
 
     PageScaffold(
         title = "设置",
@@ -277,6 +303,11 @@ fun SettingsPage(
                         summary = "直接读取 Cirno 的配置，勾选要导入的应用",
                         onClick = { showCirno = true },
                     )
+                    ArrowPreference(
+                        title = "导入 A0 后台优化名单",
+                        summary = "KILL 存为 force stop，WHITE 存为白名单或跳过不清理",
+                        onClick = { showA0 = true },
+                    )
                 }
                 if (tip.isNotEmpty()) {
                     // 提示行放在卡片外：它属于「刚才那次操作的结果」，不属于任何一组设置
@@ -306,6 +337,21 @@ fun SettingsPage(
                                 }
                             }
                         },
+                    )
+                }
+            }
+        }
+
+        item(key = "module") {
+            Column {
+                SmallTitle(text = "模块")
+                Card(modifier = Modifier.nextCard()) {
+                    // 热刷入放在「模块」组而不是「配置备份」：它换的是程序本体（二进制 + APK），
+                    // 不是用户配置。放错组会让人以为它只影响名单。
+                    ArrowPreference(
+                        title = "热刷入模块",
+                        summary = "选一个模块 zip，覆盖程序并重启守护，不用重启手机；名单与配置保留",
+                        onClick = { hotInstallLauncher.launch(arrayOf("*/*")) },
                     )
                 }
             }
@@ -367,6 +413,16 @@ fun SettingsPage(
             showCirno = false
             tip = msg
             // 名单变了，主页与设置页的计数要立刻跟着变，不然用户以为没导进去
+            onRefresh()
+        },
+    )
+
+    A0ImportDialog(
+        show = showA0,
+        onDismiss = { showA0 = false },
+        onImported = { msg ->
+            showA0 = false
+            tip = msg
             onRefresh()
         },
     )

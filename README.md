@@ -1,239 +1,77 @@
 # AppKiller — HyperOS 后台冻结超时清理
 
 被系统冻结之后还继续占着 uid、进程槽和内存的后台应用，冻结满阈值就清掉；中途只要被用过就重新计时。
+判定直接读 cgroup，不 hook、不注入、不依赖 LSPosed。
 
-判定直接读 cgroup，不 hook、不注入、不依赖 LSPosed。策略语义与 [Cirno](https://github.com/Adkimsm/Cirno) 对齐。
+## 功能
 
-## 为什么必须读 cgroup
+- **冻结超时清理**：读 `/proc/<pid>/cgroup` 判断冻结（HyperOS 的 greeze 与 AOSP freezer 不是一回事，`State:T` 在 HyperOS 上恒为假），连续冻结超过阈值即清理，中途被使用就重新计时。
+- **清理时间三级优先**：应用二级页单独设置 > 黑名单默认 5 分钟 > 全局 30 分钟。
+- **三种清理方式**：`sigkill`（直接断进程）、`am kill`（先让应用自己退出再补刀）、`force stop`（杀完还阻止系统重新拉起）。可按应用、按进程单独覆盖。
+- **force stop 压制窗口**：`am force-stop` 置的 `FLAG_STOPPED` 挡不住厂商层（joyose、powerkeeper、云控不走 AMS），所以窗口内额外压到最严待机桶 + 禁后台启动权限 + 冒头就再杀，到期自动恢复。
+- **先整体暂停再统一杀**：避免先杀主进程导致 `:push` / `:remote` 被立刻拉起，杀完再扫三轮兜底。
+- **名单体系**：硬保护 / 黑名单（强制清理）/ 白名单（豁免）/ 输入法 / persistent / 系统应用六层判定，与 Cirno 语义对齐；系统应用判定取 `uid < 10000`、App 生成清单、`pm list packages -s` 三路并集。
+- **运行列表**：全部后台应用分两段，上段「即将去死」= 已冻结且正在计时，下段「未冻结」= 系统尚未回收、不参与清理。
+- **二级页**：读 APK 二进制清单列出全部声明进程，叠加实时运行状态。
+- **名单导入**：Cirno（`/data/system/Cirno/ApplicationSettings.json`）与 A0 后台优化（`/sdcard/Android/A0_Memory/config.conf`）直接读取，弹候选框勾选。
+- **热刷入模块**：设置页选一个模块 zip，应用自己解压覆盖并重启守护进程，不用重启手机，名单与配置保留。
 
-HyperOS（澎湃 OS）的 greeze 与 AOSP 的 freezer 不是一回事：
+## A0 名单映射
 
-| 位置 | 含义 |
+| A0 格式 | 存成什么 |
 | --- | --- |
-| `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>` | 普通后台进程 |
-| `/sys/fs/cgroup/system/...` | 系统进程 |
-| `/sys/fs/cgroup/frozen` | **被冻结的进程整体迁移到这里** |
-| `/sys/fs/cgroup/frozen/cgroup.freeze` | 全局冻结开关，冻结时为 1 |
+| `KILL <包名>` | `perapp.conf` 里 `mode=force_stop scope=pkg` |
+| `KILL <包名>:<子进程>` | `perproc.conf` 里 `mode=force_stop` |
+| `WHITE <包名>` | `protect.list`；勾「存为跳过不清理」则额外写 `perproc.conf mode=skip` |
 
-本机实测（Redmi K50 / Android 17 / OS4.0.0.14）：被冻结的 `com.netease.cloudmusic` 的 `/proc/<pid>/cgroup` 显示 `0::/frozen`，utime/stime 三秒内完全停滞（973124 → 973124），但 `/proc/<pid>/stat` 的状态字符仍然是 `S`。
-
-所以「按 State:T 判断冻结」在 HyperOS 上恒为假。daemon 保留三路判定：
-
-1. cgroup 路径前缀 `/frozen`（HyperOS greeze，主路径）
-2. 同路径下 `cgroup.events` 含 `frozen 1`（cgroup v2 标准 freezer）
-3. `/proc/<pid>/stat` 状态为 `T`/`t`（SIGSTOP 式冻结）
-
-## 计时语义
-
-- 包内出现可见进程（`oom_score_adj < ACTIVE_ADJ`，默认 200）→ 计时清零
-- 包内进程被解冻 → 计时清零
-- 全部进程在后台且至少一个处于冻结 → 开始计时
-- 连续冻结时长 ≥ `TIMEOUT_MIN` → 执行清理
-
-即「中间用过就重置」。实测证据：观察窗口内 `com.tencent.mm` 的剩余时间从 27s 变回 63s，说明回到前台确实重置了计时。
-
-## 名单策略（与 Cirno 一致）
-
-判定优先级，从高到低：
-
-1. **硬保护**（代码内置，任何配置不可覆盖）：`android`、`system_server`、`com.android.systemui`、`com.android.phone`、`com.android.server.telecom`、`com.android.bluetooth`、`com.android.permissioncontroller`、`com.miui.home`、`com.yg.appkiller`（管理器自身）
-2. **黑名单** `blacklist.list` → 强制参与清理（可覆盖下面的所有豁免）
-3. **白名单** `protect.list` → 豁免。**整份沿用 Cirno 的 `CommonConstants.whiteApps`**（约 90 条，含中文注释：小米/OPPO/一加/真我/三星/谷歌系与各家 Magisk 管理器）
-4. **当前输入法** → 豁免（Cirno 的 `FreezeExemption.INPUT`；杀掉正在用的输入法会让用户当场打不出字）。daemon 用 `settings get secure default_input_method` 取包名，随配置热重载刷新
-5. **persistent 应用** `immortal.list` → 豁免（`android:persistent=true`，杀了系统会立刻拉起，清理只是白费 cpu）
-6. **系统应用** → 按 `SYSTEM_DEFAULT`（默认 `protect`，即**整体豁免**，与 Cirno 的 `FreezeExemption.SYSTEM` 一致）。判定三路取并集，任一路命中即算系统应用：① 运行时 `uid < 10000`（等价 Cirno 的 `ApplicationInfo.uid < Process.FIRST_APPLICATION_UID`，直接读 `/proc/<pid>` 属主 uid，**不依赖任何清单文件**）；② 命中 App 生成的 `system_apps.list`；③ 命中 daemon 启动时 `pm list packages -s` 的兜底结果
-7. **普通应用** → 按 `USER_DEFAULT`（默认 `manage`，即默认纳入清理）
-
-`system_apps.list` 与 `immortal.list` 由管理器 App 在冷启动时于 IO 线程生成并触发 RELOAD。系统应用的判定不能只看 `getApplicationInfo(pkg).flags`：HyperOS 4 上包可见性受限时它返回 null，flags 与 sourceDir 全为空，系统应用会被误判成普通应用 —— 一旦按误判结果写进清单，daemon 的系统豁免就形同虚设。所以 App 侧也取三路并集：`pm list packages -s` 的直接输出、`ApplicationInfo.uid < 10000`、`FLAG_SYSTEM` 或安装路径不在 `/data` 下。
-
-清单为空时 daemon 仍会自己跑一次 `pm list packages -s` 兜底（HyperOS 4 上 `QUERY_ALL_PACKAGES` 并不保证 PackageManager 能枚举全量，必须以 pm 输出为准）。
-
-想清理某个被豁免的系统应用，把它写进 `blacklist.list`：黑名单优先级高于系统应用豁免。
-
-## 目录结构
-
-```
-appkiller-hyperos/
-├── src/appkillerd.c       守护进程（单文件）
-├── src/appkillerd.h       配置结构与函数声明
-├── module/                KernelSU / Magisk 模块
-│   ├── module.prop        v1.3 / versionCode 13
-│   ├── config.conf        全部可调参数（热重载）
-│   ├── protect.list       Cirno 默认白名单
-│   ├── blacklist.list     黑名单
-│   ├── service.sh         开机启动（管理器 APK 在刷入时已装）
-│   ├── action.sh          模块管理器「执行」按钮入口
-│   ├── webroot/           KernelSU WebUI 页面
-│   └── bin/               appkillerd + appkiller.apk
-├── app/                   管理器 App（Kotlin + Compose + Miuix，按 miuix-compose-ui skill 模板搭建）
-│   └── app/src/main/java/com/yg/appkiller/   四页 + ui/（壳、页面、数据层、工具）
-├── out/appkillerd         daemon 编译产物
-└── dist/                  模块 zip
-└── LICENSE                GPL-3.0
-```
-
-## 管理器 App
-
-界面层按 miuix-compose-ui skill 的模板从零搭建，组件来自 [Miuix](https://github.com/compose-miuix-ui/miuix) 0.9.4；
-页面结构与间距/字号阶梯沿用 skill 的 DesignTokens（2/4/8/12/16dp 五档间距、MiuixTheme.textStyles 全部字号），
-卡片分组语义照 [Cirno](https://github.com/Adkimsm/Cirno)，底栏两态（贴底 NavigationBar / 悬浮 FloatingNavigationBar + 纹理模糊）。
-
-四个标签：
-
-| 标签 | 内容 |
-| --- | --- |
-| **主页** | 状态卡三档配色（守护中 / 未运行 / 无 root）+ 守护状态、已运行、已杀死、白名单数、黑名单数五条数据 + 设备型号 / 系统版本 |
-| **应用** | 447 项全量应用列表：58dp 图标 / 应用名 / 包名 / 系统标签；搜索 + 右上角筛选弹层（分类单选 + 白名单/黑名单多选并集），点进二级页 |
-| **运行列表** | 全部后台应用，分两段。上段「即将去死」= 已冻结且正在计时：图标 / 名称 / 已冻结时长 + 剩余时间 / 包名 / `已冻结/总` 进程标签；下段「未冻结」= 系统尚未回收、不参与清理，也一并列出（否则「为什么还这么卡」没有答案） |
-| **设置** | 守护进程（状态 / 启用开关 / 重启）、清理规则（清理时间 / 清理方式 + 各方式说明小字 / 仅演练）、界面（主题与外观）、配置备份（导出 / 导入 / 导入 Cirno 名单）、日志、危险操作 |
-
-### 二级页
-
-`AppDetailActivity` 六组：身份行（72dp 图标 + 名称 + 包名）→ 名单（白 / 黑 SwitchPreference，互斥写盘）→
-清理方式（per-app 下拉：跟随全局 / sigkill / am kill / force stop）→ 清理时间（per-app 下拉：跟随上级 / 1–120 分钟，优先于全局与黑名单默认值）→ 当前进程（每 2s 刷新，逐进程可单独设
-跟随应用 / sigkill / am kill / force stop / 跳过不清理，点击立即按该档清理）→ 系统（跳系统应用信息）→ 危险操作（立即清理）。
-
-### 代码结构（`app/app/src/main/java/com/yg/appkiller/`）
-
-| 位置 | 说明 |
-| --- | --- |
-| `ui/AppShellActivity.kt` / `AppShell.kt` | 入口与四标签壳：`HorizontalPager`（`beyondViewportPageCount = 1`）+ 两态底栏 |
-| `ui/util/PageScaffold.kt` | 页面骨架：`Scaffold` + `contentWindowInsets`（只取左右）+ `BlurredBar` 顶栏 + `LazyColumn` |
-| `ui/util/BlurUtils.kt` | 渐进模糊顶栏（`progressiveTextureBlur` + `TopBarBlurConfig`）与 `rememberBlurBackdrop` |
-| `ui/util/DesignTokens.kt` / `CardSpacing.kt` | 间距阶梯与卡片边距（`firstCard()` / `nextCard()`） |
-| `ui/theme/MiuixAppTheme.kt` | 主题、动态取色、深浅色判定 |
-| `ui/data/DaemonStateViewModel.kt` | 1s 轮询的守护状态流（`flowOn(Dispatchers.IO)` + `stateIn(WhileSubscribed)`） |
-| `ui/screens/HomePage.kt` / `AppListPage.kt` / `RunningPage.kt` / `SettingsPage.kt` | 四页 |
-| `ui/screens/AppListViewModel.kt` | 双流派生（全量 + 搜索词 + 分类 + 白/黑两布尔取并集），图标解码走 LRU（400 项） |
-| `ui/screens/AppDetailActivity.kt` / `ThemeActivity.kt` / `CirnoImportDialog.kt` | 二级页、主题页、Cirno 名单候选框 |
-| `Ctrl.kt` / `Repos.kt` | 数据通道：控制端口协议封装 + root 直读文件 |
-
-minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求）。
-
-数据通道双路：
-
-- **本地控制通道（首选）**：daemon 监听 `127.0.0.1:27183`，单行协议 `AK1 appkiller <CMD>`，支持 `PING / STATUS / CFG / LOG / LIST / SETLIST / SETKV / RELOAD / KILLPKG / PROCS / KILLPID / GETPERAPP / SETPERAPP / GETPERPROC / SETPERPROC`
-- **root 通道（兜底）**：一次 `su` 批量读 `run/state.json` + `config.conf` + 四份名单；写文件用 `base64 -d` 绕开 shell 转义
-
-控制端口优先的原因：每 2s 轮询都 fork 一次 `su` 读 5 个文件（含 330 行 `system_apps.list`）会拖卡主线程，实测是列表卡顿主因。
 ## 配置项
 
-改完不用重启（下一轮热重载），也可 `sh /data/adb/modules/appkiller/action.sh reload`。
+`module/config.conf`，改完热重载生效，也可在管理器「设置 → 重启守护」立刻生效。
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `ENABLE` | 1 | 总开关 |
-| `TIMEOUT_MIN` | 30 | 冻结多少分钟后清理，可写小数（0.5 = 30 秒） |
-| `BLACKLIST_TIMEOUT_MIN` | 5 | 黑名单应用的清理时间（分钟，可写小数），命中 `blacklist.list` 的包用它而不是 `TIMEOUT_MIN` |
+| `TIMEOUT_MIN` | 30 | 冻结多少分钟后清理，可写小数 |
+| `BLACKLIST_TIMEOUT_MIN` | 5 | 黑名单应用的清理时间 |
 | `INTERVAL_MS` | 2000 | 扫描间隔（最小 200） |
-| `KILL_MODE` | sigkill | 全局默认清理方式：`sigkill` / `am_kill` / `force_stop`，可被 per-app / per-proc 覆盖 |
-| `FORCE_STOP_HOLD_MIN` | 5 | `force_stop` 的压制窗口（分钟，0 = 关闭）：杀完这段时间内持续阻止系统拉起 |
-
-清理时间按三级优先级取值（`pkg_effective_timeout()`）：二级页里单独设的 `此应用的清理时间`（`perapp.conf` 的 `timeout=`）> 黑名单默认 `BLACKLIST_TIMEOUT_MIN` > 全局 `TIMEOUT_MIN`。所以把某个应用写进黑名单，它冻结 5 分钟就会被清理，其余应用仍按 30 分钟。
-
-清理的执行顺序是「先整体暂停、再统一杀、最后扫三轮」：
-
-1. 扫一遍整包，把该清理的进程全部 `SIGSTOP` 按住（冻结中的先 `thaw` 再按，因为解冻那一刻它会被立刻调度）；
-2. 逐个 `SIGKILL`，每个进程按它自己的 per-proc 设置收尾 —— 设了 `am_kill` 的先 `SIGCONT` 让它收 `SIGTERM` 走 onDestroy，200ms 后还在再按住断掉；设了 `skip` 的直接放开不动；
-3. 再扫三轮（各间隔 150ms），把 system_server 在这几十毫秒里重新拉起来的也一并按住杀掉。
-
-为什么不边扫边杀：先杀主进程，system_server 会立刻按 ServiceRecord 把 `:push` / `:remote` 拉起来，等扫到它们时已经是新进程了 —— 日志上写着「杀 3 个」，实际还剩 1 个在跑。
-
-### force_stop 的压制窗口
-
-`am force-stop` 置的是 `PackageManager` 的 `FLAG_STOPPED`：AMS 在 `startProcessLocked` 之前会拒绝为它启动进程，
-广播 / Service / Alarm / Job 全部丢弃，只有用户点图标才会清除。这一层是可靠的 —— **但它挡不住厂商层**。
-
-HyperOS 自己的后台管理（joyose、`com.miui.powerkeeper`、云控策略）不走 AMS 这条正规路径，它按包名直接 fork 进程，
-`stopped` 标志对它无效。这就是「force stop 了但几秒后又冒出来」的真实原因。
-
-所以 `force_stop` 档在杀完之后会开一个压制窗口（`FORCE_STOP_HOLD_MIN`，默认 5 分钟），窗口内做三件事：
-
-1. `am set-standby-bucket <pkg> restricted` —— 压到最严格的待机桶，Alarm/Job 调度间隔拉到最长、网络受限；
-2. `cmd appops set <pkg> RUN_ANY_IN_BACKGROUND ignore` —— 直接禁掉后台启动权限；
-3. 每轮扫描复检该包的进程数，**又冒出来就再杀**（`hold rekills` 日志），并把窗口刷新为满长，持续压制。
-
-到期后自动 `reset` / `default` 恢复，不留副作用。状态写进 `state.json` 的 `holding` 数组，管理器可显示「已压制 · 剩余 N 秒」。
-
-为什么不是「先暂停再杀」：进程处于 T 态（SIGSTOP）确实不会产生 `BR_DEAD_BINDER`，AMS 会认为它还活着、`mProcessNames` 命中后复用记录而不 fork —— 
-这是唯一能从根本上掐掉重启链的手段。但**一旦 SIGKILL，这个前提立刻被破坏**，AMS 必然走完整重启链。
-所以「暂停后仍然杀」并不能减少拉起次数；能减少拉起的只有「只暂停不杀」或「杀掉的同时改掉重启前提」，后者正是 `stopped` 标志 + 压制窗口在做的事。
-
-`am` 命令必须通过 `sh -c` 调用，不能直接 `execl("/system/bin/am", ...)`：那是个 shell 包装脚本，最终 exec `app_process` 依赖 `ANDROID_DATA` / `ANDROID_ROOT` / `BOOTCLASSPATH`，而 daemon 由 `nohup` 从 `service.sh` 拉起、环境极简，直接 execl 会让 `am` 静默失败（fork 出去的子进程仍 exit 0，看起来像成功了）。
+| `KILL_MODE` | sigkill | 全局默认清理方式，可被 per-app / per-proc 覆盖 |
 | `KILL_SCOPE` | pkg | `pkg` 整个应用 / `frozen` 只清被冻结的进程 |
+| `FORCE_STOP_HOLD_MIN` | 5 | force stop 压制窗口，0 = 关闭 |
 | `DRY_RUN` | 0 | 1 = 只记日志不杀 |
 | `ACTIVE_ADJ` | 200 | 低于此 adj 视为可见，立刻重置计时 |
 | `MAX_KILL_PER_ROUND` | 3 | 每轮最多清理几个 |
 | `KILL_COOLDOWN_SEC` | 180 | 同一应用两次清理最短间隔 |
-| `PROTECT_FILE` | protect.list | 白名单 |
-| `BLACKLIST_FILE` | blacklist.list | 黑名单 |
-| `SYSTEM_LIST_FILE` | system_apps.list | 系统应用清单 |
-| `IMMORTAL_FILE` | immortal.list | persistent 应用清单 |
-| `SYSTEM_DEFAULT` | protect | 系统应用默认策略（Cirno 语义：豁免） |
+| `SYSTEM_DEFAULT` | protect | 系统应用默认策略 |
 | `USER_DEFAULT` | manage | 普通应用默认策略 |
 | `CTL_PORT` | 27183 | 本地控制端口，0 = 关闭 |
 
-per-app 覆盖写在 `perapp.conf`（`<包名> mode=<> scope=<> timeout=<秒>`），per-proc 覆盖写在 `perproc.conf`（`<进程名> <mode>`，进程名即 `cmdline`）。
-两处 mode 都取 `sigkill` / `am_kill` / `force_stop`，per-proc 另多一个 `skip`（跳过不清理）；空或 `follow` 表示跟随上一级。
-`timeout=` 省略或为 0 表示跟随上级（黑名单默认 → 全局 `TIMEOUT_MIN`）。
+per-app 覆盖写在 `perapp.conf`（`<包名> mode=<> scope=<> timeout=<秒>`），per-proc 写在 `perproc.conf`（`<进程名> mode=<>`）。
+mode 取 `sigkill` / `am_kill` / `force_stop`，per-proc 另多一个 `skip`；空或 `follow` 表示跟随上一级。
 
 ## 安装
 
-1. KernelSU / Magisk 管理器刷入 `dist/appkiller-v1.3.zip`（管理器 APK 在刷入阶段就装好，不必等开机）
-2. 重启（或 `sh /data/adb/modules/appkiller/action.sh start`）
-3. 若刷入时 `pm` 不可用（recovery 环境），标记会在下次开机由 `service.sh` 补装一次；也可从 KernelSU 打开 WebUI
-4. 首次进 App 会弹一次 KernelSU 授权，允许后名单与状态才能直读；不授权时走本地控制端口，功能仍在
+1. KernelSU / Magisk 刷入 `dist/appkiller-v1.6.zip`（管理器 APK 在刷入阶段装好，不必等开机）
+2. 重启（或等 `service.sh` 拉起守护进程）
+3. 首次进 App 会弹一次 KernelSU 授权；不授权时走本地控制端口，功能仍在
 
 上手建议先 `DRY_RUN=1` 跑一天，确认判定符合预期再关掉。
-
-## 构建
-
-```sh
-# 守护进程
-CC=/path/to/ndk/aarch64-linux-android26-clang \
-  "$CC" -O2 -Wall -Wextra -Wno-unused-parameter -o out/appkillerd src/appkillerd.c
-
-# 管理器 APK（release 开 R8，首次约 14 分钟）
-cd app
-JAVA_HOME=/path/to/jdk21 ANDROID_HOME=/path/to/android-sdk \
-  gradle :app:assembleRelease
-```
-
-release 开了 `isMinifyEnabled` + `isShrinkResources` + `abiFilters arm64-v8a`，APK 从 81.5 MB 压到 **6.6 MB**。
-`proguard-rules.pro` 必须保留 `@Composable` 方法、`androidx.compose.runtime.**`、`top.yukonga.miuix.kmp.icon.**`
-与 blur/shader 的 `<fields>`（AGSL uniform 按字符串索引），否则界面会空白或模糊失效。
-
-主要依赖：`compose-bom 2026.08.00`、`activity-compose 1.13.0`、`top.yukonga.miuix.kmp:{miuix-ui, miuix-icons, miuix-preference, miuix-blur, miuix-shader}:0.9.4`、
-`io.github.kyant0:backdrop:1.0.6`、`androidx.compose.material3:{material3, material3-window-size-class}`。
-**minSdk 33**（`miuix-blur-android:0.9.4` 强制），compileSdk/targetSdk 37，AGP 9.4.0，Kotlin 2.4.10。
-
-依赖来源：androidx 走阿里云镜像 / Maven Central；miuix 默认从 Maven Central 解析（`top.yukonga.miuix.kmp:*`）。
-注意 `miuix-navigation3-ui` **最高只有 0.9.3**，本工程不引用它（导航壳自写）；`isRenderEffectSupported` 在 0.9.4 位于 `miuix-shader`。
-
-如果本机有 miuix 的离线仓库，可用环境变量注入，构建脚本会在仓库列表里追加它：
-
-```sh
-export MIUIX_REPO=/path/to/android-compose-libs
-```
-
-不设置时完全走远程仓库，因此**仓库里不含任何机器专属路径**。
 
 ## 已知限制
 
 - 只处理「已冻结」的应用；系统压根不冻的常驻进程不在范围内（那属于保活治理）
-- Cirno 的运行时豁免（播放音频、定位、录音、相机、悬浮窗、VPN、网速、无障碍、自动填充、通行密钥、等待推送响应）依赖 hook，本模块只能覆盖「前台可见 + 输入法 + persistent + 系统应用」这几类
-- `force_stop` 模式下被强停的应用在压制窗口内无法自拉起，依赖推送的应用可能收不到消息（窗口默认 5 分钟，可用 `FORCE_STOP_HOLD_MIN=0` 关掉压制只做一次性强停）
-- 管理器 App 的 minSdk 为 33（`miuix-blur-android:0.9.4` 的 manifest 要求），Android 12 及以下装不上；守护进程本身不受影响，低版本系统仍可用模块脚本 + WebUI
-- 界面模糊依赖 AGSL `RuntimeShader`，设备不支持时会自动降级为纯色卡片（功能不变）
-- 硬保护名单内的包即使用户拉黑也不会被处理
+- Cirno 的运行时豁免（播放音频、定位、录音、相机、悬浮窗、VPN、无障碍、自动填充、等待推送响应）依赖 hook，本模块只能覆盖「前台可见 + 输入法 + persistent + 系统应用」
+- `force stop` 模式下被强停的应用在压制窗口内无法自拉起，依赖推送的应用可能收不到消息（`FORCE_STOP_HOLD_MIN=0` 可关掉压制只做一次性强停）
+- 管理器 App 的 minSdk 为 33，Android 12 及以下装不上；守护进程本身不受影响
+- 界面模糊依赖 AGSL `RuntimeShader`，不支持时自动降级为纯色卡片
 
 ## 许可
 
 GPL-3.0。名单策略与冻结判定语义参考 [Cirno](https://github.com/Adkimsm/Cirno)（GPL-3.0），故本项目同样以 GPL-3.0 发布。
 
-## 参考项目
+## 参考来源
 
 - [Cirno](https://github.com/Adkimsm/Cirno) — 名单语义、豁免判定顺序、界面结构、cgroup 冻结后端
+- [A0 后台优化](https://www.coolapk.com/) — A0 名单格式与「乖巧模式」实现（CoolApk @EasonT）
 - [NoActive](https://github.com/cn.myflv.noactive) — 冻结/解冻触发时机
 - [Thanox](https://github.com/Tornaco/Thanox) — 场景与后台治理思路
 - [Miuix](https://github.com/compose-miuix-ui/miuix) — Compose 风格的 HyperOS 组件库

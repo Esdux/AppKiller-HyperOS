@@ -164,6 +164,22 @@ object ModuleRepo {
         }
     }
 
+    /**
+     * 直接读模块目录下的某个文本文件（逐行，已去注释与空行）。
+     *
+     * 为什么不复用 [list]：它走 Ctrl 的 LIST 命令或 readBundle 的白名单文件表，
+     * 而 perapp.conf / perproc.conf 不在那两份名单里 —— 拿它读这两个文件会静默返回空表，
+     * 于是「合并导入」变成「整份重写成只剩表头」，把用户原有配置抹掉。
+     */
+    fun readFileRaw(rel: String): List<String> {
+        if (!Shell.rootOk()) return emptyList()
+        val raw = Shell.sh("cat " + MODDIR + "/" + rel + " 2>/dev/null", 8000)
+        if (raw.isBlank()) return emptyList()
+        return raw.lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+    }
+
     /** 用 base64 传输文件内容，绕开所有 shell 转义问题 */
     fun writeFileRaw(rel: String, content: String) {
         val b64 = Base64.encodeToString(content.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
@@ -227,6 +243,191 @@ object ModuleRepo {
         }
         if (n > 0) reload()
         return n
+    }
+
+    /**
+     * 热刷入模块 zip：解压到模块目录、覆盖程序本体，保留用户名单与配置。
+     *
+     * 为什么不走 Magisk/KernelSU 的安装流程：那要重启，而模块只有「二进制 + APK +
+     * 几个脚本」三类文件，替换完重启守护进程就生效了 —— 重启整机纯属浪费。
+     *
+     * 三条必须遵守的顺序：
+     * 1. **先停守护进程**。它是被替换的那个文件，运行中替换会让它拿着旧 inode 继续跑，
+     *    看起来刷了新版其实没换（旧进程还占着端口，App 连上的是旧逻辑）。
+     * 2. **解压时排除用户数据**。config.conf / protect.list / blacklist.list /
+     *    system_apps.list / immortal.list / perapp.conf / perproc.conf 一律不覆盖，
+     *    否则一次热刷入就把用户辛苦配的名单清空。
+     * 3. **解压完补回可执行位**。zip 里存的是 Unix 权限，但 unzip 落盘时会被 umask 削掉，
+     *    bin/appkillerd 不可执行就等于刷完起不来。
+     *
+     * 返回 (成功?, 说明文字)。
+     */
+    fun hotInstall(zipPath: String): Pair<Boolean, String> {
+        if (!Shell.rootOk()) return false to "没有 root 权限"
+        val tmp = MODDIR + ".hot"
+        // 保留用户数据的文件清单：解压时逐个跳过
+        val keep = listOf("config.conf", "protect.list", "blacklist.list", "system_apps.list",
+                          "immortal.list", "perapp.conf", "perproc.conf")
+        val keepArgs = keep.joinToString(" ") { "-x '$it'" }
+        val cmd = StringBuilder()
+        cmd.append("set -e; ")
+        cmd.append("rm -rf ").append(tmp).append("; mkdir -p ").append(tmp).append("; ")
+        cmd.append("unzip -o -q '").append(zipPath).append("' -d ").append(tmp).append(" ").append(keepArgs).append("; ")
+        // 校验：必须有这两个文件，否则不是本模块的 zip
+        cmd.append("[ -f ").append(tmp).append("/bin/appkillerd ] || { echo 'ERR no daemon'; rm -rf ").append(tmp).append("; exit 1; }; ")
+        cmd.append("[ -f ").append(tmp).append("/module.prop ] || { echo 'ERR no prop'; rm -rf ").append(tmp).append("; exit 1; }; ")
+        // 停守护进程（它是被替换的文件）
+        cmd.append("kill \$(cat ").append(MODDIR).append("/run/appkillerd.pid 2>/dev/null) 2>/dev/null || true; sleep 1; ")
+        // 覆盖：bin/ 整目录替换，其余文件逐个拷（不碰保留清单）
+        cmd.append("rm -rf ").append(MODDIR).append("/bin; cp -a ").append(tmp).append("/bin ").append(MODDIR).append("/; ")
+        cmd.append("for f in module.prop service.sh customize.sh uninstall.sh; do ")
+        cmd.append("[ -f ").append(tmp).append("/\$f ] && cp -f ").append(tmp).append("/\$f ").append(MODDIR).append("/\$f; done; ")
+        cmd.append("chmod 755 ").append(MODDIR).append("/bin/appkillerd ").append(MODDIR).append("/service.sh ").append(MODDIR).append("/customize.sh ").append(MODDIR).append("/uninstall.sh 2>/dev/null || true; ")
+        // 装新 APK（-g 保留权限；失败不影响 daemon）
+        cmd.append("pm install -r -g ").append(MODDIR).append("/bin/appkiller.apk 2>&1 | tail -1; ")
+        cmd.append("rm -rf ").append(tmp).append("; ")
+        // 起新 daemon
+        cmd.append("mkdir -p ").append(MODDIR).append("/logs ").append(MODDIR).append("/run; ")
+        cmd.append("nohup ").append(MODDIR).append("/bin/appkillerd daemon -m ").append(MODDIR).append(" >> ").append(MODDIR).append("/logs/stdout.log 2>&1 & ")
+        cmd.append("sleep 2; ")
+        cmd.append("echo \"PID=\$(cat ").append(MODDIR).append("/run/appkillerd.pid 2>/dev/null)\"")
+        val out = Shell.sh(cmd.toString(), 120000)
+        invalidateBundle()
+        val err = out.lineSequence().firstOrNull { it.startsWith("ERR ") }
+        if (err != null) return false to err.removePrefix("ERR ")
+        val pid = Regex("PID=(\\d+)").find(out)?.groupValues?.get(1) ?: ""
+        return if (pid.isNotEmpty()) true to "已热刷入，守护进程 pid " + pid else false to "刷入后守护进程没起来"
+    }
+
+    /** 读 A0 后台优化（A0_Memory）的配置；未安装返回 null。位置固定：/sdcard/Android/A0_Memory/config.conf */
+    fun readA0Config(): String? {
+        if (!Shell.rootOk()) return null
+        val raw = Shell.sh("cat /sdcard/Android/A0_Memory/config.conf 2>/dev/null", 10000)
+        return raw.ifBlank { null }
+    }
+
+    /**
+     * 解析 A0 配置里的乖巧名单（KILL）与白名单（WHITE）。
+     *
+     * 格式是「行首关键字 + 空格 + 条目」，`#` 开头是注释：
+     *   KILL com.tencent.mm:tools      ← 乖巧名单，条目带 :子进程
+     *   WHITE com.miui.securitycenter  ← 白名单，条目是包名
+     *
+     * KILL 条目带冒号，说明它针对的是子进程而不是整包 —— 这种正适合映射成
+     * per-proc 的 force_stop（只压那个子进程）。不带冒号的 KILL 则映射成 per-app。
+     * 返回 (per-app 包名表, per-proc 进程名表, 白名单表)。
+     */
+    fun parseA0Config(text: String): Triple<List<String>, List<String>, List<String>> {
+        val apps = LinkedHashSet<String>()
+        val procs = LinkedHashSet<String>()
+        val white = LinkedHashSet<String>()
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#")) continue
+            val sp = line.indexOf(' ')
+            if (sp <= 0) continue
+            val key = line.substring(0, sp).uppercase()
+            val val0 = line.substring(sp + 1).trim()
+            if (val0.isEmpty()) continue
+            when (key) {
+                "KILL" -> if (val0.contains(':')) procs.add(val0) else apps.add(val0)
+                "WHITE" -> white.add(val0)
+            }
+        }
+        return Triple(apps.sorted(), procs.sorted(), white.sorted())
+    }
+
+    /**
+     * 应用 A0 名单。
+     *
+     * 映射规则（用户指定）：
+     *   KILL  → per-app / per-proc 的清理方式设为 force_stop
+     *   WHITE → 写进 protect.list（白名单）；用户选了 skip 则改为把这些包的进程写进
+     *           perproc.conf 并设 skip，即「不动它，但也不让它占清理名额」
+     *
+     * merge=true 与现有配置取并集；false 则用导入内容整体替换（白名单永远保留管理器自身）。
+     * 返回 (per-app 数, per-proc 数, 白名单数)。
+     */
+    fun importA0Selection(
+        apps: List<String>,
+        procs: List<String>,
+        white: List<String>,
+        whiteAsSkip: Boolean,
+        merge: Boolean,
+    ): Triple<Int, Int, Int> {
+        if (!Shell.rootOk()) return Triple(0, 0, 0)
+
+        // per-app：KILL 的不带冒号条目 → force_stop
+        val perapp = LinkedHashMap<String, Triple<String, String, Int>>()
+        if (merge) {
+            for (e in parsePerApp(readFileRaw("perapp.conf"))) perapp[e.first] = e.second
+        }
+        for (p in apps) perapp[p] = Triple("force_stop", "pkg", 0)
+        val sbA = StringBuilder("# 每应用覆盖配置：<包名> mode=<sigkill|am_kill|force_stop> scope=<pkg|frozen> timeout=<秒>\n")
+        for ((p, v) in perapp) {
+            sbA.append(p)
+            if (v.first.isNotEmpty()) sbA.append(" mode=").append(v.first)
+            if (v.second.isNotEmpty()) sbA.append(" scope=").append(v.second)
+            if (v.third > 0) sbA.append(" timeout=").append(v.third)
+            sbA.append('\n')
+        }
+        writeFileRaw("perapp.conf", sbA.toString())
+
+        // per-proc：KILL 的带冒号条目 → force_stop；白名单选了 skip 的也走这里
+        val perproc = LinkedHashMap<String, String>()
+        if (merge) {
+            for (e in parsePerProc(readFileRaw("perproc.conf"))) perproc[e.first] = e.second
+        }
+        for (p in procs) perproc[p] = "force_stop"
+        if (whiteAsSkip) for (p in white) perproc[p] = "skip"
+        val sbP = StringBuilder("# 每进程覆盖配置：<进程名> mode=<sigkill|am_kill|force_stop|skip>\n")
+        for ((p, m) in perproc) sbP.append(p).append(" mode=").append(m).append('\n')
+        writeFileRaw("perproc.conf", sbP.toString())
+
+        // 白名单：写 protect.list；选了 skip 的也一并放进来（双保险，避免被当成普通应用）
+        val wSet = if (merge) list("protect.list").toMutableSet() else mutableSetOf("com.yg.appkiller")
+        wSet.addAll(white)
+        writeListNoReload("protect.list", "# 白名单（含 A0 导入）", wSet)
+
+        reload()
+        return Triple(apps.size, perproc.size, wSet.size)
+    }
+
+    /** 解析 perapp.conf 的原始行 -> (包名, (mode, scope, timeout))。
+     *  注意 list() 已经把注释与空行过滤掉了，但每行仍是「包名 key=value ...」的原始形态。 */
+    private fun parsePerApp(lines: List<String>): List<Pair<String, Triple<String, String, Int>>> {
+        val out = ArrayList<Pair<String, Triple<String, String, Int>>>()
+        for (raw in lines) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#")) continue
+            val parts = line.split(Regex("\\s+"))
+            if (parts.isEmpty()) continue
+            var mode = ""; var scope = ""; var tmo = 0
+            for (i in 1 until parts.size) {
+                val t = parts[i]
+                when {
+                    t.startsWith("mode=") -> mode = t.removePrefix("mode=")
+                    t.startsWith("scope=") -> scope = t.removePrefix("scope=")
+                    t.startsWith("timeout=") -> tmo = t.removePrefix("timeout=").toIntOrNull() ?: 0
+                }
+            }
+            out.add(parts[0] to Triple(mode, scope, tmo))
+        }
+        return out
+    }
+
+    /** 解析 perproc.conf 的原始行 -> (进程名, mode) */
+    private fun parsePerProc(lines: List<String>): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        for (raw in lines) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#")) continue
+            val parts = line.split(Regex("\\s+"))
+            if (parts.size < 2) continue
+            val m = parts.firstOrNull { it.startsWith("mode=") }?.removePrefix("mode=") ?: continue
+            out.add(parts[0] to m)
+        }
+        return out
     }
 
     /** 直接读设备上的 Cirno 配置；未安装 / 无配置返回 null */

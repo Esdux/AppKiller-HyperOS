@@ -40,13 +40,10 @@ fi
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/bin/appkillerd" 0 0 0755
 set_perm "$MODPATH/service.sh" 0 0 0755
-set_perm "$MODPATH/action.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 set_perm "$MODPATH/customize.sh" 0 0 0755
 
-# webroot 里的 CGI 必须可执行
-[ -d "$MODPATH/webroot/cgi-bin" ] && set_perm_recursive "$MODPATH/webroot/cgi-bin" 0 0 0755 0755
 
 ui_print "- 安装完成。先看日志："
-ui_print "    sh /data/adb/modules/appkiller/action.sh log"
+ui_print "    日志: /data/adb/modules/appkiller/logs/daemon.log"
 ui_print "- 调阈值： /data/adb/modules/appkiller/config.conf  (TIMEOUT_MIN=30)"
