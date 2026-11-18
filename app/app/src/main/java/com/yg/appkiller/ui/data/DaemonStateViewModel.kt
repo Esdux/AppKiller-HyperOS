@@ -47,6 +47,10 @@ data class DaemonState(
     val killMode: String get() = config["KILL_MODE"] ?: "sigkill"
     val timeoutMin: Int get() = config["TIMEOUT_MIN"]?.toIntOrNull() ?: 60
     val dryRun: Boolean get() = (config["DRY_RUN"] ?: "0") == "1"
+    /** 每轮最多清理几个应用，0 = 不限 */
+    val maxKillPerRound: Int get() = config["MAX_KILL_PER_ROUND"]?.toIntOrNull() ?: 3
+    /** 同一应用两次清理的最短间隔（秒） */
+    val killCooldownSec: Int get() = config["KILL_COOLDOWN_SEC"]?.toIntOrNull() ?: 180
 }
 
 /**

@@ -125,7 +125,7 @@ fun CirnoImportDialog(
 
     WindowDialog(
         show = show,
-        title = "导入 Cirno 名单",
+        title = "导入 Cirno 配置",
         summary = if (loading) "正在读取…" else if (error.isNotEmpty()) "读取失败" else
             "白名单 " + white.size + " 项 · 黑名单 " + black.size + " 项，已勾选 " + selected.size + " 项",
         onDismissRequest = onDismiss,
@@ -202,7 +202,10 @@ fun CirnoImportDialog(
 
             Spacer(Modifier.height(DshSpacing.Block))
 
-            Row(horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
                 TextButton(
                     modifier = Modifier.weight(1f),
                     text = "取消",

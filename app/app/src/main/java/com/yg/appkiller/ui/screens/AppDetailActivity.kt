@@ -38,6 +38,8 @@ import com.yg.appkiller.ui.theme.MiuixAppTheme
 import com.yg.appkiller.ui.util.DshIconSize
 import com.yg.appkiller.ui.util.DshSpacing
 import com.yg.appkiller.ui.util.PageScaffold
+import com.yg.appkiller.ui.util.TimeoutInputDialog
+import com.yg.appkiller.ui.util.timeoutText
 import com.yg.appkiller.ui.util.firstCard
 import com.yg.appkiller.ui.util.nextCard
 import kotlinx.coroutines.Dispatchers
@@ -151,23 +153,24 @@ private val MODE_LABELS = listOf("跟随全局", "sigkill", "am kill", "force st
 private val PROC_MODE_LABELS = listOf("跟随应用", "sigkill", "am kill", "force stop", "跳过不清理")
 
 /**
- * 该应用自己的清理时间档位（秒）。索引 0 = 跟随上级。
+ * 该应用自己的清理时间档位（分钟）。索引 0 = 跟随上级。
  *
- * 与设置页的全局档位同一套刻度，用户不用在两处学两套数。
- * 「跟随」排第一是因为它是默认值 —— 绝大多数应用不该单独设时间，
+ * 与设置页同一套刻度、同一单位（分钟）。内部落盘仍是秒（daemon 的 perapp.conf
+ * 写 timeout=<秒>），只在界面上换算一次 —— 单位混用是这类设置最容易输错零的地方。
+ * 「跟随」排第一是因为它是默认值：绝大多数应用不该单独设时间，
  * 只有「必须早点杀」和「必须留久点」两类才需要动它。
  */
-private val TIMEOUT_STEPS_SEC = listOf(0, 60, 120, 300, 600, 900, 1800, 3600, 7200)
-private fun timeoutLabelOf(sec: Int): String = when {
-    sec <= 0 -> "跟随上级"
-    sec < 60 -> sec.toString() + " 秒"
-    sec % 3600 == 0 -> (sec / 3600).toString() + " 小时"
-    sec % 60 == 0 -> (sec / 60).toString() + " 分钟"
-    else -> sec.toString() + " 秒"
-}
+// 与设置页同一套档位（1 / 5 / 30 分钟、1 / 2 小时），另加「跟随上级」；
+// 档位外的时间走末尾的「自定义」。
+private val TIMEOUT_STEPS_MIN = listOf(0, 1, 5, 30, 60, 120)
+// 显示与全局设置页同一套换算（60 → 1 小时、1440 → 1 天）。
+private fun timeoutLabelOf(min: Int): String = timeoutText(min)
+/** 秒 → 分钟，仅用于显示与档位匹配；非整分钟的值向上取整，避免显示成 0。 */
+private fun secToMin(sec: Int): Int = if (sec <= 0) 0 else (sec + 59) / 60
 private fun timeoutToIndex(sec: Int): Int {
-    val i = TIMEOUT_STEPS_SEC.indexOf(sec)
-    return if (i >= 0) i else 0
+    val i = TIMEOUT_STEPS_MIN.indexOf(secToMin(sec))
+    // 不在档位里就落到末尾的自定义项，让它把实际值显示出来
+    return if (i >= 0) i else TIMEOUT_STEPS_MIN.size
 }
 
 /** PROC_MODE_LABELS 下标 → perproc.conf 的 mode 值（"" = 不写配置，跟随应用）。 */
@@ -218,8 +221,11 @@ private fun AppDetailContent(
     var inWhite by remember { mutableStateOf(false) }
     var inBlack by remember { mutableStateOf(false) }
     var modeIndex by remember { mutableIntStateOf(0) }
-    // 该应用自己的清理时间（秒），0 = 跟随上级。索引制便于复用下拉组件。
+    // 该应用自己的清理时间，索引对应 TIMEOUT_STEPS_MIN（分钟），0 = 跟随上级。
     var timeoutIndex by remember { mutableIntStateOf(0) }
+    var showTimeout by remember { mutableStateOf(false) }
+    // 自定义分钟数。只在选中「自定义」项时才是当前有效值，其余时候仅供显示。
+    var customMin by remember { mutableIntStateOf(0) }
     var procs by remember { mutableStateOf<List<Ctrl.ProcEntry>>(emptyList()) }
     // 清单声明的进程名（DECLPROCS）。与 procs 互补：这份是「一共会有哪些进程」，
     // 应用没启动也有；procs 是「此刻活着的」，带 pid/adj/冻结状态。
@@ -238,6 +244,9 @@ private fun AppDetailContent(
                 inBlack = black.contains(pkg)
                 modeIndex = modeToIndex(per.mode)
                 timeoutIndex = timeoutToIndex(per.timeoutSec)
+                // 自定义值要原样记住：secToMin 向上取整只用于显示与匹配档位，
+                // 落盘时用这里存的分钟数，避免 90 秒被写成 120 秒。
+                customMin = secToMin(per.timeoutSec)
             }
         }
         // 清单只读一次：它是静态的，应用更新前不会变。解 APK 要读几 MB，不适合放进 2 秒轮询。
@@ -249,6 +258,16 @@ private fun AppDetailContent(
             delay(2_000L)
         }
     }
+
+    // 当前清理时间的秒数：不在档位里（自定义值）时按分钟数换算，不丢精度。
+    val currentTimeoutSec = if (timeoutIndex < TIMEOUT_STEPS_MIN.size) {
+        TIMEOUT_STEPS_MIN[timeoutIndex] * 60
+    } else {
+        customMin * 60
+    }
+    val timeoutItems = TIMEOUT_STEPS_MIN.map { timeoutLabelOf(it) } +
+        if (timeoutIndex < TIMEOUT_STEPS_MIN.size) "自定义…"
+        else timeoutLabelOf(customMin) + "（自定义）"
 
     fun setMembership(white: Boolean, black: Boolean) {
         if (busy) return
@@ -362,7 +381,7 @@ private fun AppDetailContent(
                             modeIndex = next
                             scope.launch {
                                 val ok = withContext(Dispatchers.IO) {
-                                    Ctrl.setPerApp(pkg, indexToMode(next), "pkg", TIMEOUT_STEPS_SEC[timeoutIndex])
+                                    Ctrl.setPerApp(pkg, indexToMode(next), "pkg", currentTimeoutSec)
                                 }
                                 toast(if (ok) "已设为 " + MODE_LABELS[next] else "设置失败：守护进程未运行")
                             }
@@ -371,24 +390,30 @@ private fun AppDetailContent(
                     // 清理时间与清理方式同一张卡：两者一起决定「什么时候、怎么杀」，
                     // 拆成两组会让用户在两个地方来回确认。它优先级高于全局与黑名单默认值。
                     WindowDropdownPreference(
-                        items = TIMEOUT_STEPS_SEC.map { timeoutLabelOf(it) },
+                        items = timeoutItems,
                         selectedIndex = timeoutIndex,
                         title = "此应用的清理时间",
                         summary = "冻结超过这个时间才清理，优先于全局与黑名单默认值",
                         onSelectedIndexChange = { next ->
-                            timeoutIndex = next
-                            scope.launch {
-                                val ok = withContext(Dispatchers.IO) {
-                                    Ctrl.setPerApp(pkg, indexToMode(modeIndex), "pkg", TIMEOUT_STEPS_SEC[next])
+                            // 「自定义」不直接落盘，先开输入框；取消则保持原值。
+                            if (next >= TIMEOUT_STEPS_MIN.size) {
+                                showTimeout = true
+                            } else {
+                                timeoutIndex = next
+                                scope.launch {
+                                    val ok = withContext(Dispatchers.IO) {
+                                        Ctrl.setPerApp(pkg, indexToMode(modeIndex), "pkg", TIMEOUT_STEPS_MIN[next] * 60)
+                                    }
+                                    toast(if (ok) "清理时间设为 " + timeoutLabelOf(TIMEOUT_STEPS_MIN[next])
+                                          else "设置失败：守护进程未运行")
                                 }
-                                toast(if (ok) "清理时间设为 " + timeoutLabelOf(TIMEOUT_STEPS_SEC[next])
-                                      else "设置失败：守护进程未运行")
                             }
                         },
                     )
                 }
             }
         }
+
 
         item(key = "procs") {
             Column {
@@ -485,4 +510,26 @@ private fun AppDetailContent(
             }
         }
     }
+
+    // 对话框放在 LazyColumn 外面：它是 Window 级弹层，不属于列表项，
+    // 放进 item 里会在滚动时被复用/重建，输入到一半就丢焦点。
+    TimeoutInputDialog(
+        show = showTimeout,
+        title = "自定义清理时间",
+        initialMinutes = if (timeoutIndex < TIMEOUT_STEPS_MIN.size) TIMEOUT_STEPS_MIN[timeoutIndex] else customMin,
+        allowZero = false,
+        onDismiss = { showTimeout = false },
+        onConfirm = { minutes ->
+            showTimeout = false
+            customMin = minutes
+            timeoutIndex = TIMEOUT_STEPS_MIN.size
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    Ctrl.setPerApp(pkg, indexToMode(modeIndex), "pkg", minutes * 60)
+                }
+                toast(if (ok) "清理时间设为 " + timeoutLabelOf(minutes)
+                      else "设置失败：守护进程未运行")
+            }
+        },
+    )
 }

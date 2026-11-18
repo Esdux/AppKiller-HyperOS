@@ -1,6 +1,7 @@
 package com.yg.appkiller.ui.screens
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -132,7 +133,7 @@ fun A0ImportDialog(
 
     WindowDialog(
         show = show,
-        title = "导入 A0 后台优化名单",
+        title = "导入 A0 内存管理配置",
         summary = if (loading) "正在读取…" else if (error.isNotEmpty()) "读取失败" else
             groups.size.toString() + " 个应用 · " + totalItems + " 项，已勾选 " + selected.size + " 项",
         onDismissRequest = onDismiss,
@@ -214,12 +215,23 @@ fun A0ImportDialog(
 
             Spacer(Modifier.height(DshSpacing.Block))
 
-            Row(modifier = Modifier.fillMaxWidth()) {
+            // 按钮排布与设置页的危险操作确认框一致：等宽、中间 12dp、确认项用 primary 色。
+            // 少那个 Spacer 时两个按钮会贴在一起，看起来像一个控件被劈成两半。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
                 TextButton(
                     modifier = Modifier.weight(1f),
                     text = "取消",
-                    onClick = { dismiss?.invoke() },
+                    onClick = {
+                        // 两个都要调：dismiss 收弹层，onDismiss 清外部的 show 状态。
+                        // 只调 dismiss 时弹层关了但 showA0 仍是 true，下次点导入会什么都不发生。
+                        dismiss?.invoke()
+                        onDismiss()
+                    },
                 )
+                Spacer(Modifier.width(DshSpacing.Block))
                 TextButton(
                     modifier = Modifier.weight(1f),
                     text = "导入",

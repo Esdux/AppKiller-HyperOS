@@ -29,6 +29,8 @@ import com.yg.appkiller.ModuleRepo
 import com.yg.appkiller.ui.data.DaemonState
 import com.yg.appkiller.ui.util.DshSpacing
 import com.yg.appkiller.ui.util.PageScaffold
+import com.yg.appkiller.ui.util.TimeoutInputDialog
+import com.yg.appkiller.ui.util.timeoutText
 import com.yg.appkiller.ui.util.firstCard
 import com.yg.appkiller.ui.util.nextCard
 import kotlinx.coroutines.Dispatchers
@@ -60,9 +62,29 @@ private val KILL_MODE_LABELS = listOf("sigkill", "am kill", "force stop")
 private val KILL_MODE_HINT = "sigkill 直接断进程，最快；am kill 先让应用自己退出再补刀；" +
     "force stop 杀完还会阻止系统重新拉起它，推送类应用可能收不到消息。"
 
-/** 超时档位：分钟。给固定档位而不是滑杆，是因为这个值只有「几分钟」和「半小时以上」两档体感。 */
-private val TIMEOUT_STEPS = listOf(1, 2, 5, 10, 15, 30, 60, 120)
-private fun timeoutLabel(min: Int): String = if (min >= 60) (min / 60).toString() + " 小时" else min.toString() + " 分钟"
+/**
+ * 超时档位：分钟。给固定档位而不是滑杆，是因为这个值只有「几分钟」和「半小时以上」两档体感。
+ * 档位之外的值走下拉末尾的「自定义」，单位同样按分钟 —— 两处刻度一致，用户不用换算。
+ */
+/** 单次清理上限：一轮扫描最多处理几个应用。0 = 不限。 */
+private val MAX_KILL_STEPS = listOf(0, 1, 2, 3, 5, 8, 10)
+private fun maxKillLabel(n: Int): String = if (n <= 0) "不限" else n.toString() + " 个"
+
+/** 冷却间隔：同一应用两次清理之间至少隔多久。 */
+private val COOLDOWN_STEPS_SEC = listOf(0, 30, 60, 120, 180, 300, 600, 1800)
+private fun cooldownLabel(sec: Int): String = when {
+    sec <= 0 -> "不冷却"
+    sec < 60 -> sec.toString() + " 秒"
+    else -> (sec / 60).toString() + " 分钟"
+}
+
+// 档位只留真正用得上的几档：1 / 5 / 30 分钟与 1 / 2 小时。
+// 2、10、15 分钟三档删掉了 —— 它们和相邻档的体感差别用户分不出来，
+// 只会让下拉变长、把「自定义…」挤到需要滚动才看得到的位置。
+private val TIMEOUT_STEPS = listOf(1, 5, 30, 60, 120)
+private const val TIMEOUT_CUSTOM_INDEX = -1  // 占位，真正的下标见 timeoutItems()
+// 显示统一走 util/TimeoutDialog.kt 的 timeoutText：60 → 1 小时、1440 → 1 天、45 → 45 分钟。
+private fun timeoutLabel(min: Int): String = timeoutText(min)
 
 /**
  * 设置页的排班规则（三条，都是踩过坑的）：
@@ -92,16 +114,27 @@ fun SettingsPage(
     var confirmStop by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
-    var tip by remember { mutableStateOf("") }
     var showLog by remember { mutableStateOf(false) }
     var logText by remember { mutableStateOf("") }
+    // 自定义清理时间：下拉里选到「自定义」只开这个框，确认后才落盘。
+    var showTimeout by remember { mutableStateOf(false) }
 
     // 名单数量与超时档位从 state 派生，不在本页另开轮询 —— 一份 flow 供四个页面共用。
-    val timeoutIndex = remember(state.timeoutMin) {
-        TIMEOUT_STEPS.indexOfFirst { it >= state.timeoutMin }.let { if (it < 0) 6 else it }
-    }
+    // 当前值命中档位就选那一项，否则选末尾的自定义项（并把实际值显示在那一项上）。
+    val timeoutInSteps = TIMEOUT_STEPS.indexOf(state.timeoutMin)
+    val timeoutIndex = if (timeoutInSteps >= 0) timeoutInSteps else TIMEOUT_STEPS.size
+    val timeoutItems = TIMEOUT_STEPS.map { timeoutLabel(it) } +
+        if (timeoutInSteps >= 0) "自定义…" else timeoutLabel(state.timeoutMin) + "（自定义）"
     val killModeIndex = remember(state.killMode) {
         KILL_MODES.indexOf(state.killMode).let { if (it < 0) 0 else it }
+    }
+    // 上限与冷却：配置里存的值可能不在档位里（手工改过 config.conf），
+    // 那就取最接近的一档显示，别让下拉显示成空。
+    val maxKillIndex = remember(state.maxKillPerRound) {
+        MAX_KILL_STEPS.indexOfFirst { it >= state.maxKillPerRound }.let { if (it < 0) 0 else it }
+    }
+    val cooldownIndex = remember(state.killCooldownSec) {
+        COOLDOWN_STEPS_SEC.indexOfFirst { it >= state.killCooldownSec }.let { if (it < 0) 0 else it }
     }
 
     fun run(action: suspend () -> String) {
@@ -110,7 +143,9 @@ fun SettingsPage(
         scope.launch {
             val msg = withContext(Dispatchers.IO) { runCatching { action() }.getOrElse { "失败：" + it.message } }
             busy = false
-            tip = msg
+            // 只弹 Toast，不在页面上留一行「上次做了什么」——
+            // 设置项的结果看一眼就够，留在卡片下方会被当成状态的一部分，
+            // 而且它会一直挂到下次操作，看着像还没生效。
             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             onRefresh()
         }
@@ -184,7 +219,7 @@ fun SettingsPage(
             context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
         }.getOrNull()
         if (text.isNullOrBlank()) {
-            tip = "读取失败：文件为空或无法读取"
+            Toast.makeText(context, "读取失败：文件为空或无法读取", Toast.LENGTH_SHORT).show()
         } else {
             cirnoPicked = text
             showCirno = true
@@ -200,7 +235,7 @@ fun SettingsPage(
             context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
         }.getOrNull()
         if (text.isNullOrBlank()) {
-            tip = "读取失败：文件为空或无法读取"
+            Toast.makeText(context, "读取失败：文件为空或无法读取", Toast.LENGTH_SHORT).show()
         } else {
             a0Picked = text
             showA0 = true
@@ -253,14 +288,19 @@ fun SettingsPage(
                 SmallTitle(text = "清理规则")
                 Card(modifier = Modifier.nextCard()) {
                     WindowDropdownPreference(
-                        items = TIMEOUT_STEPS.map { timeoutLabel(it) },
+                        items = timeoutItems,
                         selectedIndex = timeoutIndex,
                         title = "清理时间",
                         summary = "退到后台冻结超过这个时间才清理",
                         onSelectedIndexChange = { idx ->
-                            run {
-                                ModuleRepo.setConfigs(mapOf("TIMEOUT_MIN" to TIMEOUT_STEPS[idx].toString()))
-                                "超时设为 " + timeoutLabel(TIMEOUT_STEPS[idx])
+                            // 选到「自定义」不落盘，先开输入框；取消就什么都不改。
+                            if (idx >= TIMEOUT_STEPS.size) {
+                                showTimeout = true
+                            } else {
+                                run {
+                                    ModuleRepo.setConfigs(mapOf("TIMEOUT_MIN" to TIMEOUT_STEPS[idx].toString()))
+                                    "超时设为 " + timeoutLabel(TIMEOUT_STEPS[idx])
+                                }
                             }
                         },
                     )
@@ -273,6 +313,32 @@ fun SettingsPage(
                             run {
                                 ModuleRepo.setConfigs(mapOf("KILL_MODE" to KILL_MODES[idx]))
                                 "清理方式设为 " + KILL_MODES[idx]
+                            }
+                        },
+                    )
+                    // 上限与冷却决定「一轮清几个、同一个多久能再清」，
+                    // 与清理方式同属「怎么杀」这一组，所以留在同一张卡里。
+                    WindowDropdownPreference(
+                        items = MAX_KILL_STEPS.map { maxKillLabel(it) },
+                        selectedIndex = maxKillIndex,
+                        title = "单次清理上限",
+                        summary = "一轮扫描最多处理几个应用，避免一次性清掉太多",
+                        onSelectedIndexChange = { idx ->
+                            run {
+                                ModuleRepo.setConfigs(mapOf("MAX_KILL_PER_ROUND" to MAX_KILL_STEPS[idx].toString()))
+                                "单次上限设为 " + maxKillLabel(MAX_KILL_STEPS[idx])
+                            }
+                        },
+                    )
+                    WindowDropdownPreference(
+                        items = COOLDOWN_STEPS_SEC.map { cooldownLabel(it) },
+                        selectedIndex = cooldownIndex,
+                        title = "清理冷却",
+                        summary = "同一个应用两次清理之间至少隔这么久",
+                        onSelectedIndexChange = { idx ->
+                            run {
+                                ModuleRepo.setConfigs(mapOf("KILL_COOLDOWN_SEC" to COOLDOWN_STEPS_SEC[idx].toString()))
+                                "冷却设为 " + cooldownLabel(COOLDOWN_STEPS_SEC[idx])
                             }
                         },
                     )
@@ -328,23 +394,14 @@ fun SettingsPage(
                         onClick = { importLauncher.launch(arrayOf("text/plain", "*/*")) },
                     )
                     ArrowPreference(
-                        title = "导入 Cirno 名单",
+                        title = "导入 Cirno 配置",
                         summary = "存在就直接读，也可在候选框右上角换文件",
                         onClick = { cirnoPicked = ""; showCirno = true },
                     )
                     ArrowPreference(
-                        title = "导入 A0 后台优化名单",
-                        summary = "存在就直接读，也可在候选框右上角换文件；KILL 存为 force stop，WHITE 存为白名单或跳过不清理",
+                        title = "导入 A0 内存管理配置",
+                        summary = "KILL 存为 force stop，WHITE 存为白名单或跳过不清理",
                         onClick = { a0Picked = ""; showA0 = true },
-                    )
-                }
-                if (tip.isNotEmpty()) {
-                    // 提示行放在卡片外：它属于「刚才那次操作的结果」，不属于任何一组设置
-                    MiuixText(
-                        text = tip,
-                        style = MiuixTheme.textStyles.footnote1,
-                        color = colorScheme.onSurfaceVariantSummary,
-                        modifier = Modifier.padding(start = 28.dp, top = 8.dp, end = 28.dp),
                     )
                 }
             }
@@ -442,7 +499,7 @@ fun SettingsPage(
         onDismiss = { showCirno = false },
         onImported = { msg ->
             showCirno = false
-            tip = msg
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             // 名单变了，主页与设置页的计数要立刻跟着变，不然用户以为没导进去
             onRefresh()
         },
@@ -455,8 +512,23 @@ fun SettingsPage(
         onDismiss = { showA0 = false },
         onImported = { msg ->
             showA0 = false
-            tip = msg
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
             onRefresh()
+        },
+    )
+
+    TimeoutInputDialog(
+        show = showTimeout,
+        title = "自定义清理时间",
+        initialMinutes = state.timeoutMin,
+        allowZero = false,
+        onDismiss = { showTimeout = false },
+        onConfirm = { minutes ->
+            showTimeout = false
+            run {
+                ModuleRepo.setConfigs(mapOf("TIMEOUT_MIN" to minutes.toString()))
+                "超时设为 " + timeoutLabel(minutes)
+            }
         },
     )
 

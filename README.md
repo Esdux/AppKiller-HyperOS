@@ -13,6 +13,8 @@
 
 - **冻结超时清理**：读 `/proc/<pid>/cgroup` 判断冻结（HyperOS 的 greeze 与 AOSP freezer 不是一回事，`State:T` 在 HyperOS 上恒为假），连续冻结超过阈值即清理，中途被使用就重新计时。
 - **清理时间三级优先**：应用二级页单独设置 > 黑名单默认 5 分钟 > 全局 30 分钟。
+- **自定义清理时间**：全局与二级页的清理时间下拉末尾都有「自定义…」，点开输入分钟数即可，单位统一按分钟显示。
+- **控制项补全**：清理时间、清理方式、单次清理上限、清理冷却、演练模式都能在「设置 → 清理规则」直接改，改完热重载生效。
 - **三种清理方式**：`sigkill`（直接断进程）、`am kill`（先让应用自己退出再补刀）、`force stop`（杀完还阻止系统重新拉起）。可按应用、按进程单独覆盖。
 - **force stop 压制窗口**：`am force-stop` 置的 `FLAG_STOPPED` 挡不住厂商层（joyose、powerkeeper、云控不走 AMS），所以窗口内额外压到最严待机桶 + 禁后台启动权限 + 冒头就再杀，到期自动恢复。
 - **先整体暂停再统一杀**：避免先杀主进程导致 `:push` / `:remote` 被立刻拉起，杀完再扫三轮兜底。
@@ -60,7 +62,7 @@ mode 取 `sigkill` / `am_kill` / `force_stop`，per-proc 另多一个 `skip`；�
 
 ## 安装
 
-1. KernelSU / Magisk 刷入 `dist/appkiller-v1.7.zip`（管理器 APK 在刷入阶段装好，不必等开机）
+1. KernelSU / Magisk 刷入 `dist/appkiller-v1.8.zip`（管理器 APK 在刷入阶段装好，不必等开机）
 2. 重启（或等 `service.sh` 拉起守护进程）
 3. 首次进 App 会弹一次 KernelSU 授权；不授权时走本地控制端口，功能仍在
 

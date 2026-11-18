@@ -21,6 +21,7 @@ signing.properties
 
 # 临时脚本与侦察产物
 tools/
+tmp/
 *.log
 *.tmp
 
