@@ -1546,10 +1546,12 @@ void write_state(void) {
     fprintf(f, "  \"ts\": %ld,\n", (long)time(NULL));
     fprintf(f, "  \"uptime_sec\": %lld,\n", now - g_start_mono);
     fprintf(f, "  \"pid\": %d,\n", (int)getpid());
-    fprintf(f, "  \"config\": {\"timeout_sec\": %d, \"blacklist_timeout_sec\": %d, \"interval_ms\": %d, "
+    fprintf(f, "  \"config\": {\"timeout_sec\": %d, \"blacklist_timeout_sec\": %d, "
+               "\"force_stop_hold_sec\": %d, \"interval_ms\": %d, "
                "\"kill_mode\": \"%s\", \"kill_scope\": \"%s\", \"dry_run\": %d, \"active_adj\": %d, "
                "\"protect_count\": %d},\n",
-            g_cfg.timeout_sec, g_cfg.blacklist_timeout_sec, g_cfg.interval_ms, g_cfg.kill_mode,
+            g_cfg.timeout_sec, g_cfg.blacklist_timeout_sec, g_cfg.force_stop_hold_sec,
+            g_cfg.interval_ms, g_cfg.kill_mode,
             g_cfg.kill_scope, g_cfg.dry_run, g_cfg.active_adj, g_protect_n);
 
     fprintf(f, "  \"watching\": [");
