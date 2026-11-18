@@ -127,6 +127,7 @@ minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求）。
 | `BLACKLIST_TIMEOUT_MIN` | 5 | 黑名单应用的清理时间（分钟，可写小数），命中 `blacklist.list` 的包用它而不是 `TIMEOUT_MIN` |
 | `INTERVAL_MS` | 2000 | 扫描间隔（最小 200） |
 | `KILL_MODE` | sigkill | 全局默认清理方式：`sigkill` / `am_kill` / `force_stop`，可被 per-app / per-proc 覆盖 |
+| `FORCE_STOP_HOLD_MIN` | 5 | `force_stop` 的压制窗口（分钟，0 = 关闭）：杀完这段时间内持续阻止系统拉起 |
 
 清理时间按三级优先级取值（`pkg_effective_timeout()`）：二级页里单独设的 `此应用的清理时间`（`perapp.conf` 的 `timeout=`）> 黑名单默认 `BLACKLIST_TIMEOUT_MIN` > 全局 `TIMEOUT_MIN`。所以把某个应用写进黑名单，它冻结 5 分钟就会被清理，其余应用仍按 30 分钟。
 
@@ -137,6 +138,26 @@ minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求）。
 3. 再扫三轮（各间隔 150ms），把 system_server 在这几十毫秒里重新拉起来的也一并按住杀掉。
 
 为什么不边扫边杀：先杀主进程，system_server 会立刻按 ServiceRecord 把 `:push` / `:remote` 拉起来，等扫到它们时已经是新进程了 —— 日志上写着「杀 3 个」，实际还剩 1 个在跑。
+
+### force_stop 的压制窗口
+
+`am force-stop` 置的是 `PackageManager` 的 `FLAG_STOPPED`：AMS 在 `startProcessLocked` 之前会拒绝为它启动进程，
+广播 / Service / Alarm / Job 全部丢弃，只有用户点图标才会清除。这一层是可靠的 —— **但它挡不住厂商层**。
+
+HyperOS 自己的后台管理（joyose、`com.miui.powerkeeper`、云控策略）不走 AMS 这条正规路径，它按包名直接 fork 进程，
+`stopped` 标志对它无效。这就是「force stop 了但几秒后又冒出来」的真实原因。
+
+所以 `force_stop` 档在杀完之后会开一个压制窗口（`FORCE_STOP_HOLD_MIN`，默认 5 分钟），窗口内做三件事：
+
+1. `am set-standby-bucket <pkg> restricted` —— 压到最严格的待机桶，Alarm/Job 调度间隔拉到最长、网络受限；
+2. `cmd appops set <pkg> RUN_ANY_IN_BACKGROUND ignore` —— 直接禁掉后台启动权限；
+3. 每轮扫描复检该包的进程数，**又冒出来就再杀**（`hold rekills` 日志），并把窗口刷新为满长，持续压制。
+
+到期后自动 `reset` / `default` 恢复，不留副作用。状态写进 `state.json` 的 `holding` 数组，管理器可显示「已压制 · 剩余 N 秒」。
+
+为什么不是「先暂停再杀」：进程处于 T 态（SIGSTOP）确实不会产生 `BR_DEAD_BINDER`，AMS 会认为它还活着、`mProcessNames` 命中后复用记录而不 fork —— 
+这是唯一能从根本上掐掉重启链的手段。但**一旦 SIGKILL，这个前提立刻被破坏**，AMS 必然走完整重启链。
+所以「暂停后仍然杀」并不能减少拉起次数；能减少拉起的只有「只暂停不杀」或「杀掉的同时改掉重启前提」，后者正是 `stopped` 标志 + 压制窗口在做的事。
 
 `am` 命令必须通过 `sh -c` 调用，不能直接 `execl("/system/bin/am", ...)`：那是个 shell 包装脚本，最终 exec `app_process` 依赖 `ANDROID_DATA` / `ANDROID_ROOT` / `BOOTCLASSPATH`，而 daemon 由 `nohup` 从 `service.sh` 拉起、环境极简，直接 execl 会让 `am` 静默失败（fork 出去的子进程仍 exit 0，看起来像成功了）。
 | `KILL_SCOPE` | pkg | `pkg` 整个应用 / `frozen` 只清被冻结的进程 |
@@ -201,7 +222,7 @@ export MIUIX_REPO=/path/to/android-compose-libs
 
 - 只处理「已冻结」的应用；系统压根不冻的常驻进程不在范围内（那属于保活治理）
 - Cirno 的运行时豁免（播放音频、定位、录音、相机、悬浮窗、VPN、网速、无障碍、自动填充、通行密钥、等待推送响应）依赖 hook，本模块只能覆盖「前台可见 + 输入法 + persistent + 系统应用」这几类
-- `force_stop` 模式下被强停的应用无法自拉起，依赖推送的应用可能收不到消息
+- `force_stop` 模式下被强停的应用在压制窗口内无法自拉起，依赖推送的应用可能收不到消息（窗口默认 5 分钟，可用 `FORCE_STOP_HOLD_MIN=0` 关掉压制只做一次性强停）
 - 管理器 App 的 minSdk 为 33（`miuix-blur-android:0.9.4` 的 manifest 要求），Android 12 及以下装不上；守护进程本身不受影响，低版本系统仍可用模块脚本 + WebUI
 - 界面模糊依赖 AGSL `RuntimeShader`，设备不支持时会自动降级为纯色卡片（功能不变）
 - 硬保护名单内的包即使用户拉黑也不会被处理

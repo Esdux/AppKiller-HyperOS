@@ -18,9 +18,11 @@ STRIP="$TOOLCHAIN/bin/llvm-strip"
 mkdir -p "$ROOT/out" "$ROOT/module/bin" "$ROOT/dist"
 
 echo "==> 编译 (arm64-v8a, api $API)"
+# clang 是原生 Windows 程序，不认 MSYS 的 /e/... 路径；先 cd 进工程再用相对路径
+cd "$ROOT"
 "$CC" -O2 -Wall -Wextra -Wno-unused-parameter \
       -Wl,--gc-sections --target=aarch64-linux-android${API} \
-      -o "$ROOT/module/bin/appkillerd" "$ROOT/src/appkillerd.c" "$ROOT/src/declprocs.c" -lz
+      -o module/bin/appkillerd src/appkillerd.c src/declprocs.c -lz
 [ -x "$STRIP" ] && "$STRIP" --strip-all "$ROOT/module/bin/appkillerd" || true
 cp -f "$ROOT/module/bin/appkillerd" "$ROOT/out/appkillerd"
 echo "    产物 $ROOT/out/appkillerd ($(wc -c < "$ROOT/out/appkillerd") 字节)"
