@@ -378,11 +378,20 @@ object StateRepo {
             val bgArr = root.optJSONArray("background")
             val bg = ArrayList<BgApp>()
             if (bgArr != null) {
+                // pkg 一定要归一化成包名（截掉 :子进程 后缀）。
+                // 偶尔会出现「只有子进程在跑、主进程没起」的包，daemon 那边的 pkg
+                // 若带了冒号，getApplicationInfo / getApplicationIcon 会抛
+                // NameNotFoundException —— 表现就是图标空白、名称退回成「包名:子进程」。
+                // 这里做一道归一化，比只在 daemon 侧修更保险：两端各归一一次，
+                // 任一端漏了都不会把带冒号的名字漏到 UI 上。
+                val seenPkg = HashSet<String>(bgArr.length())
                 for (i in 0 until bgArr.length()) {
                     val o = bgArr.getJSONObject(i)
+                    val basePkg = o.optString("pkg").substringBefore(':')
+                    if (basePkg.isEmpty() || !seenPkg.add(basePkg)) continue
                     bg.add(
                         BgApp(
-                            pkg = o.optString("pkg"),
+                            pkg = basePkg,
                             frozen = o.optBoolean("frozen"),
                             counting = o.optBoolean("counting"),
                             frozenSec = o.optLong("frozen_sec"),

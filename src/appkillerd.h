@@ -35,6 +35,7 @@
 typedef struct {
     int  enable;
     int  timeout_sec;
+    int  blacklist_timeout_sec;    /* 黑名单专属清理时间：命中黑名单就用它，不等全局 */
     int  interval_ms;
     int  active_adj;
     int  min_uid;
@@ -98,6 +99,7 @@ typedef struct {
     char pkg[PKG_LEN];
     char mode[SMALL_LEN];   /* sigkill | am_kill | force_stop */
     char scope[SMALL_LEN];  /* pkg | frozen */
+    int  timeout_sec;       /* 该应用自己的清理时间，0 = 跟随上级（黑名单 / 全局） */
 } perapp_t;
 
 /* 每进程覆盖配置：按进程名（cmdline）匹配 */
@@ -128,7 +130,8 @@ int  perapp_load(const char *moddir);
 int  perproc_load(const char *moddir);
 perapp_t  *perapp_lookup(const char *pkg);
 perproc_t *perproc_lookup(const char *procname);
-int  perapp_save(const char *pkg, const char *mode, const char *scope);
+int  perapp_save(const char *pkg, const char *mode, const char *scope, int timeout_sec);
+int  pkg_effective_timeout(const char *pkg);
 int  perproc_save(const char *procname, const char *mode);
 
 /* ---- /proc 读取 ---- */

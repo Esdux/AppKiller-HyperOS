@@ -85,12 +85,12 @@ appkiller-hyperos/
 | **主页** | 状态卡三档配色（守护中 / 未运行 / 无 root）+ 守护状态、已运行、已杀死、白名单数、黑名单数五条数据 + 设备型号 / 系统版本 |
 | **应用** | 447 项全量应用列表：58dp 图标 / 应用名 / 包名 / 系统标签；搜索 + 右上角筛选弹层（分类单选 + 白名单/黑名单多选并集），点进二级页 |
 | **运行列表** | 全部后台应用，分两段。上段「即将去死」= 已冻结且正在计时：图标 / 名称 / 已冻结时长 + 剩余时间 / 包名 / `已冻结/总` 进程标签；下段「未冻结」= 系统尚未回收、不参与清理，也一并列出（否则「为什么还这么卡」没有答案） |
-| **设置** | 守护进程（状态 / 启用开关 / 重启）、清理规则（后台超时 / 清理方式 / 仅演练）、界面（主题与外观）、配置备份（导出 / 导入 / 导入 Cirno 名单）、日志、危险操作 |
+| **设置** | 守护进程（状态 / 启用开关 / 重启）、清理规则（清理时间 / 清理方式 + 各方式说明小字 / 仅演练）、界面（主题与外观）、配置备份（导出 / 导入 / 导入 Cirno 名单）、日志、危险操作 |
 
 ### 二级页
 
 `AppDetailActivity` 六组：身份行（72dp 图标 + 名称 + 包名）→ 名单（白 / 黑 SwitchPreference，互斥写盘）→
-清理方式（per-app 下拉：跟随全局 / sigkill / am kill / force stop）→ 当前进程（每 2s 刷新，逐进程可单独设
+清理方式（per-app 下拉：跟随全局 / sigkill / am kill / force stop）→ 清理时间（per-app 下拉：跟随上级 / 1–120 分钟，优先于全局与黑名单默认值）→ 当前进程（每 2s 刷新，逐进程可单独设
 跟随应用 / sigkill / am kill / force stop / 跳过不清理，点击立即按该档清理）→ 系统（跳系统应用信息）→ 危险操作（立即清理）。
 
 ### 代码结构（`app/app/src/main/java/com/yg/appkiller/`）
@@ -124,8 +124,11 @@ minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求）。
 | --- | --- | --- |
 | `ENABLE` | 1 | 总开关 |
 | `TIMEOUT_MIN` | 30 | 冻结多少分钟后清理，可写小数（0.5 = 30 秒） |
+| `BLACKLIST_TIMEOUT_MIN` | 5 | 黑名单应用的清理时间（分钟，可写小数），命中 `blacklist.list` 的包用它而不是 `TIMEOUT_MIN` |
 | `INTERVAL_MS` | 2000 | 扫描间隔（最小 200） |
 | `KILL_MODE` | sigkill | 全局默认清理方式：`sigkill` / `am_kill` / `force_stop`，可被 per-app / per-proc 覆盖 |
+
+清理时间按三级优先级取值（`pkg_effective_timeout()`）：二级页里单独设的 `此应用的清理时间`（`perapp.conf` 的 `timeout=`）> 黑名单默认 `BLACKLIST_TIMEOUT_MIN` > 全局 `TIMEOUT_MIN`。所以把某个应用写进黑名单，它冻结 5 分钟就会被清理，其余应用仍按 30 分钟。
 
 清理的执行顺序是「先整体暂停、再统一杀、最后扫三轮」：
 
@@ -149,8 +152,9 @@ minSdk 为 **33**（`miuix-blur-android:0.9.4` 的 manifest 要求）。
 | `USER_DEFAULT` | manage | 普通应用默认策略 |
 | `CTL_PORT` | 27183 | 本地控制端口，0 = 关闭 |
 
-per-app 覆盖写在 `perapp.conf`（`<包名> <mode> <scope>`），per-proc 覆盖写在 `perproc.conf`（`<进程名> <mode>`，进程名即 `cmdline`）。
+per-app 覆盖写在 `perapp.conf`（`<包名> mode=<> scope=<> timeout=<秒>`），per-proc 覆盖写在 `perproc.conf`（`<进程名> <mode>`，进程名即 `cmdline`）。
 两处 mode 都取 `sigkill` / `am_kill` / `force_stop`，per-proc 另多一个 `skip`（跳过不清理）；空或 `follow` 表示跟随上一级。
+`timeout=` 省略或为 0 表示跟随上级（黑名单默认 → 全局 `TIMEOUT_MIN`）。
 
 ## 安装
 

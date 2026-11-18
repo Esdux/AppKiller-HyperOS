@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import com.yg.appkiller.Ctrl
 import com.yg.appkiller.ModuleRepo
 import com.yg.appkiller.ui.data.DaemonState
+import com.yg.appkiller.ui.util.DshSpacing
 import com.yg.appkiller.ui.util.PageScaffold
 import com.yg.appkiller.ui.util.firstCard
 import com.yg.appkiller.ui.util.nextCard
@@ -33,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.TextButton
@@ -47,7 +49,15 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 
 /** 全局清理方式的选项顺序，与 config.conf 的 KILL_MODE 取值一一对应。 */
 private val KILL_MODES = listOf("sigkill", "am_kill", "force_stop")
-private val KILL_MODE_LABELS = listOf("sigkill（强杀，最彻底）", "am kill（系统清理）", "force stop（强制停止）")
+// 下拉项只放名字本身。括号里的「强杀，最彻底」这类后缀在窄屏上会被截断，
+// 而且它解释的是效果不是名字 —— 那类说明放在控件下方的 FootNote 里统一讲。
+private val KILL_MODE_LABELS = listOf("sigkill", "am kill", "force stop")
+
+// 三档的实际差别（写在控件下方的小字）：
+//   先说「能不能挡住系统重启」，再说「应用有没有机会收尾」，最后才是副作用。
+//   用户选这一项时真正关心的是前两句。
+private val KILL_MODE_HINT = "sigkill 直接断进程，最快；am kill 先让应用自己退出再补刀；" +
+    "force stop 杀完还会阻止系统重新拉起它，推送类应用可能收不到消息。"
 
 /** 超时档位：分钟。给固定档位而不是滑杆，是因为这个值只有「几分钟」和「半小时以上」两档体感。 */
 private val TIMEOUT_STEPS = listOf(1, 2, 5, 10, 15, 30, 60, 120)
@@ -190,8 +200,8 @@ fun SettingsPage(
                     WindowDropdownPreference(
                         items = TIMEOUT_STEPS.map { timeoutLabel(it) },
                         selectedIndex = timeoutIndex,
-                        title = "后台超时",
-                        summary = "退到后台超过这个时间才清理",
+                        title = "清理时间",
+                        summary = "退到后台冻结超过这个时间才清理",
                         onSelectedIndexChange = { idx ->
                             run {
                                 ModuleRepo.setConfigs(mapOf("TIMEOUT_MIN" to TIMEOUT_STEPS[idx].toString()))
@@ -210,6 +220,15 @@ fun SettingsPage(
                                 "清理方式设为 " + KILL_MODES[idx]
                             }
                         },
+                    )
+                    // 控件下方的小字说明：下拉项里放不下，也不该塞进去。
+                    // 用 Text 而不是 BasicComponent：后者是两行布局（标题+摘要），
+                    // 标题留空会白占一行高度。
+                    MiuixText(
+                        text = KILL_MODE_HINT,
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        modifier = Modifier.padding(start = DshSpacing.CardInside, end = DshSpacing.CardInside, bottom = DshSpacing.Block),
                     )
                     SwitchPreference(
                         title = "仅演练不执行",

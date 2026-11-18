@@ -1,6 +1,6 @@
 id=appkiller
 name=AppKiller 后台冻结超时清理
-version=v1.4
-versionCode=14
+version=v1.5
+versionCode=15
 author=YG
-description=HyperOS 后台冻结/清理守护。四标签 Miuix 管理器：主页状态、应用名单、运行列表、设置；支持白/黑名单、per-app 与 per-proc 四档清理方式、Cirno 名单导入、配置导入导出。清理先整体暂停再统一杀，二级页读 APK 清单列出全部声明进程。
+description=HyperOS 后台冻结/清理守护。四标签 Miuix 管理器：主页状态、应用名单、运行列表、设置；支持白/黑名单、per-app 清理方式与清理时间、per-proc 四档清理方式、Cirno 名单导入、配置导入导出。清理先整体暂停再统一杀；清理时间三级优先（应用单独设置 > 黑名单 5 分钟 > 全局 30 分钟）；二级页读 APK 清单列出全部声明进程。

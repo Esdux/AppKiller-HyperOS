@@ -20,13 +20,14 @@ mkdir -p "$ROOT/out" "$ROOT/module/bin" "$ROOT/dist"
 echo "==> 编译 (arm64-v8a, api $API)"
 "$CC" -O2 -Wall -Wextra -Wno-unused-parameter \
       -Wl,--gc-sections --target=aarch64-linux-android${API} \
-      -o "$ROOT/module/bin/appkillerd" "$ROOT/src/appkillerd.c"
+      -o "$ROOT/module/bin/appkillerd" "$ROOT/src/appkillerd.c" "$ROOT/src/declprocs.c" -lz
 [ -x "$STRIP" ] && "$STRIP" --strip-all "$ROOT/module/bin/appkillerd" || true
 cp -f "$ROOT/module/bin/appkillerd" "$ROOT/out/appkillerd"
 echo "    产物 $ROOT/out/appkillerd ($(wc -c < "$ROOT/out/appkillerd") 字节)"
 
 # 若已构建管理器 APK，一并打进模块
-APK_SRC="$ROOT/app/app/build/outputs/apk/debug/app-debug.apk"
+APK_SRC="$ROOT/app/app/build/outputs/apk/release/app-release.apk"
+[ -f "$APK_SRC" ] || APK_SRC="$ROOT/app/app/build/outputs/apk/debug/app-debug.apk"
 if [ -f "$APK_SRC" ]; then
     cp -f "$APK_SRC" "$ROOT/module/bin/appkiller.apk"
     echo "    打入管理器 APK ($(wc -c < "$ROOT/module/bin/appkiller.apk") 字节)"

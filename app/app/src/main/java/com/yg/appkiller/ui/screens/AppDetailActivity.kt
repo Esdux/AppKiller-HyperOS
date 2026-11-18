@@ -150,6 +150,26 @@ private val MODE_LABELS = listOf("跟随全局", "sigkill", "am kill", "force st
  */
 private val PROC_MODE_LABELS = listOf("跟随应用", "sigkill", "am kill", "force stop", "跳过不清理")
 
+/**
+ * 该应用自己的清理时间档位（秒）。索引 0 = 跟随上级。
+ *
+ * 与设置页的全局档位同一套刻度，用户不用在两处学两套数。
+ * 「跟随」排第一是因为它是默认值 —— 绝大多数应用不该单独设时间，
+ * 只有「必须早点杀」和「必须留久点」两类才需要动它。
+ */
+private val TIMEOUT_STEPS_SEC = listOf(0, 60, 120, 300, 600, 900, 1800, 3600, 7200)
+private fun timeoutLabelOf(sec: Int): String = when {
+    sec <= 0 -> "跟随上级"
+    sec < 60 -> sec.toString() + " 秒"
+    sec % 3600 == 0 -> (sec / 3600).toString() + " 小时"
+    sec % 60 == 0 -> (sec / 60).toString() + " 分钟"
+    else -> sec.toString() + " 秒"
+}
+private fun timeoutToIndex(sec: Int): Int {
+    val i = TIMEOUT_STEPS_SEC.indexOf(sec)
+    return if (i >= 0) i else 0
+}
+
 /** PROC_MODE_LABELS 下标 → perproc.conf 的 mode 值（"" = 不写配置，跟随应用）。 */
 private fun indexToProcMode(index: Int): String = when (index) {
     1 -> "sigkill"
@@ -174,11 +194,13 @@ private fun modeToIndex(mode: String): Int = when (mode) {
     else -> 0
 }
 
+// 返回 "-" 而不是空串：控制端口按空格切参数，空串会变成两个连续空格，
+// daemon 解析时后续的 scope / timeout 全部错位（表现为选了时间却不落盘）。
 private fun indexToMode(index: Int): String = when (index) {
     1 -> "sigkill"
     2 -> "am_kill"
     3 -> "force_stop"
-    else -> ""
+    else -> "-"
 }
 
 @Composable
@@ -196,6 +218,8 @@ private fun AppDetailContent(
     var inWhite by remember { mutableStateOf(false) }
     var inBlack by remember { mutableStateOf(false) }
     var modeIndex by remember { mutableIntStateOf(0) }
+    // 该应用自己的清理时间（秒），0 = 跟随上级。索引制便于复用下拉组件。
+    var timeoutIndex by remember { mutableIntStateOf(0) }
     var procs by remember { mutableStateOf<List<Ctrl.ProcEntry>>(emptyList()) }
     // 清单声明的进程名（DECLPROCS）。与 procs 互补：这份是「一共会有哪些进程」，
     // 应用没启动也有；procs 是「此刻活着的」，带 pid/adj/冻结状态。
@@ -212,7 +236,8 @@ private fun AppDetailContent(
             withContext(Dispatchers.Main) {
                 inWhite = white.contains(pkg)
                 inBlack = black.contains(pkg)
-                modeIndex = modeToIndex(per.first)
+                modeIndex = modeToIndex(per.mode)
+                timeoutIndex = timeoutToIndex(per.timeoutSec)
             }
         }
         // 清单只读一次：它是静态的，应用更新前不会变。解 APK 要读几 MB，不适合放进 2 秒轮询。
@@ -337,9 +362,27 @@ private fun AppDetailContent(
                             modeIndex = next
                             scope.launch {
                                 val ok = withContext(Dispatchers.IO) {
-                                    Ctrl.setPerApp(pkg, indexToMode(next), "pkg")
+                                    Ctrl.setPerApp(pkg, indexToMode(next), "pkg", TIMEOUT_STEPS_SEC[timeoutIndex])
                                 }
                                 toast(if (ok) "已设为 " + MODE_LABELS[next] else "设置失败：守护进程未运行")
+                            }
+                        },
+                    )
+                    // 清理时间与清理方式同一张卡：两者一起决定「什么时候、怎么杀」，
+                    // 拆成两组会让用户在两个地方来回确认。它优先级高于全局与黑名单默认值。
+                    WindowDropdownPreference(
+                        items = TIMEOUT_STEPS_SEC.map { timeoutLabelOf(it) },
+                        selectedIndex = timeoutIndex,
+                        title = "此应用的清理时间",
+                        summary = "冻结超过这个时间才清理，优先于全局与黑名单默认值",
+                        onSelectedIndexChange = { next ->
+                            timeoutIndex = next
+                            scope.launch {
+                                val ok = withContext(Dispatchers.IO) {
+                                    Ctrl.setPerApp(pkg, indexToMode(modeIndex), "pkg", TIMEOUT_STEPS_SEC[next])
+                                }
+                                toast(if (ok) "清理时间设为 " + timeoutLabelOf(TIMEOUT_STEPS_SEC[next])
+                                      else "设置失败：守护进程未运行")
                             }
                         },
                     )

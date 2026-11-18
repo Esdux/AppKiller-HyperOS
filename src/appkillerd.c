@@ -168,6 +168,7 @@ void cfg_defaults(void) {
     memset(&g_cfg, 0, sizeof(g_cfg));
     g_cfg.enable                = 1;
     g_cfg.timeout_sec           = 30 * 60;
+    g_cfg.blacklist_timeout_sec = 5 * 60;    /* 黑名单：冻结 5 分钟就杀 */
     g_cfg.interval_ms           = 2000;
     g_cfg.active_adj            = 200;
     g_cfg.min_uid               = 1000;
@@ -199,6 +200,8 @@ static void cfg_assign(const char *k, const char *v) {
     if (ci_eq(k, "ENABLE"))                     g_cfg.enable = atoi(v) != 0;
     else if (ci_eq(k, "TIMEOUT_MIN"))           g_cfg.timeout_sec = (int)(atof(v) * 60.0);
     else if (ci_eq(k, "TIMEOUT_SEC"))           g_cfg.timeout_sec = atoi(v);
+    else if (ci_eq(k, "BLACKLIST_TIMEOUT_MIN")) g_cfg.blacklist_timeout_sec = (int)(atof(v) * 60.0);
+    else if (ci_eq(k, "BLACKLIST_TIMEOUT_SEC")) g_cfg.blacklist_timeout_sec = atoi(v);
     else if (ci_eq(k, "INTERVAL_MS"))           g_cfg.interval_ms = atoi(v);
     else if (ci_eq(k, "ACTIVE_ADJ"))            g_cfg.active_adj = atoi(v);
     else if (ci_eq(k, "MIN_UID"))               g_cfg.min_uid = atoi(v);
@@ -396,7 +399,8 @@ int perapp_load(const char *moddir) {
         char *t = trim(line);
         if (!*t || *t == '#') continue;
         char pkg[PKG_LEN] = ""; char mode[SMALL_LEN] = ""; char scope[SMALL_LEN] = "";
-        /* 解析: pkg [mode=X] [scope=Y] */
+        int tmo = 0;
+        /* 解析: pkg [mode=X] [scope=Y] [timeout=<秒>] */
         char *sp = t;
         char *tok = strsep(&sp, " \t");
         if (!tok) continue;
@@ -406,15 +410,17 @@ int perapp_load(const char *moddir) {
             if (!tok || !*tok) continue;
             if (!strncasecmp(tok, "mode=", 5))  snprintf(mode, sizeof(mode), "%s", tok + 5);
             else if (!strncasecmp(tok, "scope=", 6)) snprintf(scope, sizeof(scope), "%s", tok + 6);
+            else if (!strncasecmp(tok, "timeout=", 8)) { tmo = atoi(tok + 8); if (tmo < 0) tmo = 0; }
         }
         if (!pkg[0]) continue;
         if (mode[0] && !valid_mode(mode)) mode[0] = '\0';
         if (scope[0] && strcmp(scope, "pkg") && strcmp(scope, "frozen")) scope[0] = '\0';
-        if (!mode[0] && !scope[0]) continue;
+        if (!mode[0] && !scope[0] && tmo == 0) continue;
         perapp_t *e = &g_perapp[g_perapp_n++];
         snprintf(e->pkg, PKG_LEN, "%s", pkg);
         snprintf(e->mode, SMALL_LEN, "%s", mode);
         snprintf(e->scope, SMALL_LEN, "%s", scope);
+        e->timeout_sec = tmo;
     }
     fclose(f);
     return g_perapp_n;
@@ -471,12 +477,13 @@ static int perapp_write_all(void) {
     list_path(p, sizeof(p), g_cfg.perapp_file);
     FILE *f = fopen(p, "w");
     if (!f) return -1;
-    fprintf(f, "# 每应用覆盖配置：<包名> mode=<sigkill|am_kill|force_stop> scope=<pkg|frozen>\n");
+    fprintf(f, "# 每应用覆盖配置：<包名> mode=<sigkill|am_kill|force_stop> scope=<pkg|frozen> timeout=<秒>\n");
     for (int i = 0; i < g_perapp_n; i++) {
         perapp_t *e = &g_perapp[i];
         fprintf(f, "%s", e->pkg);
         if (e->mode[0])  fprintf(f, " mode=%s", e->mode);
         if (e->scope[0]) fprintf(f, " scope=%s", e->scope);
+        if (e->timeout_sec > 0) fprintf(f, " timeout=%d", e->timeout_sec);
         fputc('\n', f);
     }
     fclose(f);
@@ -495,12 +502,13 @@ static int perproc_write_all(void) {
     return 0;
 }
 
-int perapp_save(const char *pkg, const char *mode, const char *scope) {
+int perapp_save(const char *pkg, const char *mode, const char *scope, int timeout_sec) {
     if (!pkg || !*pkg) return -1;
     if (mode && mode[0] && !valid_mode(mode)) return -1;
     if (scope && scope[0] && strcmp(scope, "pkg") && strcmp(scope, "frozen")) return -1;
+    if (timeout_sec < 0) return -1;
     perapp_t *e = perapp_lookup(pkg);
-    if ((!mode || !mode[0]) && (!scope || !scope[0])) {
+    if ((!mode || !mode[0]) && (!scope || !scope[0]) && timeout_sec == 0) {
         /* 两项都空 = 删除该包的覆盖 */
         if (e) {
             int i = (int)(e - g_perapp);
@@ -517,6 +525,7 @@ int perapp_save(const char *pkg, const char *mode, const char *scope) {
     }
     if (mode)  snprintf(e->mode, SMALL_LEN, "%s", mode);
     if (scope) snprintf(e->scope, SMALL_LEN, "%s", scope);
+    e->timeout_sec = timeout_sec;
     return perapp_write_all();
 }
 
@@ -895,7 +904,10 @@ void scan_round(void) {
         if (scan[i].active > 0) continue;      /* 有可见进程 = 在前台，不算后台 */
         bgpkg_t *b = &g_bg[g_bg_n++];
         memset(b, 0, sizeof(*b));
-        snprintf(b->pkg, PKG_LEN, "%s", scan[i].pkg);
+        /* 输出前再归一化一次：只留包名、截掉 :子进程 后缀。
+         * 管理器 App 拿这个 pkg 去查 getApplicationInfo / getApplicationIcon，
+         * 带冒号的名字一定 NameNotFoundException，UI 上就变成空白图标 + 包名。 */
+        normalize_pkg(scan[i].pkg, b->pkg, PKG_LEN);
         b->uid       = scan[i].uid;
         b->frozen    = scan[i].frozen;
         b->total     = scan[i].total;
@@ -1277,6 +1289,20 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
     return 1;
 }
 
+/* 这个包该等多久才清理 —— 三档优先级，越具体越优先：
+ *   1) perapp.conf 里给该应用单独设的 timeout（用户在二级页填的）
+ *   2) 命中黑名单 → BLACKLIST_TIMEOUT_MIN（默认 5 分钟）
+ *   3) 全局 TIMEOUT_MIN
+ * 之前只有全局一档，于是「黑名单应用五分钟就杀」根本做不到：黑名单只是
+ * pkg_should_manage() 里的一个放行分支，跟清理时机完全无关。 */
+int pkg_effective_timeout(const char *pkg) {
+    perapp_t *pa = perapp_lookup(pkg);
+    if (pa && pa->timeout_sec > 0) return pa->timeout_sec;
+    if (pkg && *pkg && pkg_in_list2(g_blacklist, g_blacklist_n, pkg))
+        return g_cfg.blacklist_timeout_sec;
+    return g_cfg.timeout_sec;
+}
+
 int decide_round(int dry_run) {
     long long now = mono_sec();
     int idx[MAX_PKGS];
@@ -1286,7 +1312,7 @@ int decide_round(int dry_run) {
         pkgent_t *p = &g_pkgs[i];
         if (p->since == 0) continue;
         long long dur = now - p->since;
-        if (dur < g_cfg.timeout_sec) continue;
+        if (dur < pkg_effective_timeout(p->pkg)) continue;
         if (!pkg_should_manage(p->pkg, p->uid)) continue;
         if (p->last_kill && (now - p->last_kill) < g_cfg.kill_cooldown_sec) continue;
         idx[n++] = i;
@@ -1333,7 +1359,7 @@ int decide_round(int dry_run) {
 
         log_msg("%spkg=%s frozen=%llds>=%ds uid=%d procs=%d scope=%s -> %s(%s) pids=[%s]",
                 dry_run ? "[dry-run] " : "",
-                p->pkg, dur, g_cfg.timeout_sec, p->uid, p->total,
+                p->pkg, dur, pkg_effective_timeout(p->pkg), p->uid, p->total,
                 k_scope, ok ? "match" : "no-match",
                 k_mode, pids);
 
@@ -1365,7 +1391,7 @@ static void write_watching_text(long long now) {
         pkgent_t *p = &g_pkgs[i];
         if (p->since == 0) continue;
         long long dur = now - p->since;
-        long long rem = (long long)g_cfg.timeout_sec - dur;
+        long long rem = (long long)pkg_effective_timeout(p->pkg) - dur;
         if (rem < 0) rem = 0;
         fprintf(f, "%-42s %4d %4d %6llds %7llds %s\n",
                 p->pkg, p->frozen, p->total, dur, rem,
@@ -1388,9 +1414,10 @@ void write_state(void) {
     fprintf(f, "  \"ts\": %ld,\n", (long)time(NULL));
     fprintf(f, "  \"uptime_sec\": %lld,\n", now - g_start_mono);
     fprintf(f, "  \"pid\": %d,\n", (int)getpid());
-    fprintf(f, "  \"config\": {\"timeout_sec\": %d, \"interval_ms\": %d, \"kill_mode\": \"%s\", "
-               "\"kill_scope\": \"%s\", \"dry_run\": %d, \"active_adj\": %d, \"protect_count\": %d},\n",
-            g_cfg.timeout_sec, g_cfg.interval_ms, g_cfg.kill_mode,
+    fprintf(f, "  \"config\": {\"timeout_sec\": %d, \"blacklist_timeout_sec\": %d, \"interval_ms\": %d, "
+               "\"kill_mode\": \"%s\", \"kill_scope\": \"%s\", \"dry_run\": %d, \"active_adj\": %d, "
+               "\"protect_count\": %d},\n",
+            g_cfg.timeout_sec, g_cfg.blacklist_timeout_sec, g_cfg.interval_ms, g_cfg.kill_mode,
             g_cfg.kill_scope, g_cfg.dry_run, g_cfg.active_adj, g_protect_n);
 
     fprintf(f, "  \"watching\": [");
@@ -1399,12 +1426,13 @@ void write_state(void) {
         pkgent_t *p = &g_pkgs[i];
         if (p->since == 0) continue;
         long long dur = now - p->since;
-        long long rem = (long long)g_cfg.timeout_sec - dur;
+        int pto = pkg_effective_timeout(p->pkg);
+        long long rem = (long long)pto - dur;
         if (rem < 0) rem = 0;
         fprintf(f, "%s\n    {\"pkg\": \"%s\", \"uid\": %d, \"frozen_procs\": %d, \"total_procs\": %d, "
-                   "\"frozen_sec\": %lld, \"remain_sec\": %lld, \"killed_times\": %d, \"protected\": %s}",
+                   "\"frozen_sec\": %lld, \"remain_sec\": %lld, \"timeout_sec\": %d, \"killed_times\": %d, \"protected\": %s}",
                 first ? "" : ",", p->pkg, p->uid, p->frozen, p->total,
-                dur, rem, p->killed_times, pkg_is_protected(p->pkg) ? "true" : "false");
+                dur, rem, pto, p->killed_times, pkg_is_protected(p->pkg) ? "true" : "false");
         first = 0;
     }
     fprintf(f, "%s],\n", first ? "" : "\n  ");
@@ -1425,15 +1453,16 @@ void write_state(void) {
     for (int i = 0; i < g_bg_n; i++) {
         bgpkg_t *b = &g_bg[i];
         long long dur = b->since > 0 ? now - b->since : 0;
-        long long rem = b->since > 0 ? (long long)g_cfg.timeout_sec - dur : 0;
+        int bto = pkg_effective_timeout(b->pkg);
+        long long rem = b->since > 0 ? (long long)bto - dur : 0;
         if (rem < 0) rem = 0;
         fprintf(f, "%s\n    {\"pkg\": \"%s\", \"uid\": %d, \"frozen_procs\": %d, \"total_procs\": %d, "
                    "\"frozen\": %s, \"counting\": %s, \"frozen_sec\": %lld, \"remain_sec\": %lld, "
-                   "\"protected\": %s}",
+                   "\"timeout_sec\": %d, \"protected\": %s}",
                 i ? "," : "", b->pkg, b->uid, b->frozen, b->total,
                 b->frozen > 0 ? "true" : "false",
                 b->since > 0 ? "true" : "false",
-                dur, rem, b->protected ? "true" : "false");
+                dur, rem, bto, b->protected ? "true" : "false");
     }
     fprintf(f, "%s],\n", g_bg_n ? "\n  " : "");
 
@@ -1674,8 +1703,9 @@ static void ctl_handle(int c, char *req) {
         char *pkg = trim(cmd + 10);
         perapp_t *e = perapp_lookup(pkg);
         char b[512];
-        if (e) snprintf(b, sizeof(b), "OK %s %s\n", e->mode[0] ? e->mode : "-", e->scope[0] ? e->scope : "-");
-        else   snprintf(b, sizeof(b), "OK - -\n");
+        if (e) snprintf(b, sizeof(b), "OK %s %s %d\n", e->mode[0] ? e->mode : "-",
+                        e->scope[0] ? e->scope : "-", e->timeout_sec);
+        else   snprintf(b, sizeof(b), "OK - - 0\n");
         ctl_reply(c, b);
         return;
     }
@@ -1688,11 +1718,17 @@ static void ctl_handle(int c, char *req) {
         char *pkg = trim(p2);
         char *rest = trim(sp1 + 1);
         char *sp2 = strchr(rest, ' ');
-        char *mode = rest; char *scope = NULL;
-        if (sp2) { *sp2 = '\0'; scope = trim(sp2 + 1); }
+        char *mode = rest; char *scope = NULL; char *tmo = NULL;
+        if (sp2) {
+            *sp2 = '\0'; scope = trim(sp2 + 1);
+            char *sp3 = strchr(scope, ' ');
+            if (sp3) { *sp3 = '\0'; tmo = trim(sp3 + 1); }
+        }
         if (mode && strcmp(mode, "-") == 0) mode = "";
         if (scope && strcmp(scope, "-") == 0) scope = "";
-        if (perapp_save(pkg, mode, scope) == 0) { g_reload = 1; ctl_reply(c, "OK\n"); }
+        int tsec = 0;
+        if (tmo && *tmo && strcmp(tmo, "-")) tsec = atoi(tmo);
+        if (perapp_save(pkg, mode, scope, tsec) == 0) { g_reload = 1; ctl_reply(c, "OK\n"); }
         else ctl_reply(c, "ERR write\n");
         return;
     }

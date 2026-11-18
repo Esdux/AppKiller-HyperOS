@@ -79,15 +79,34 @@ object Ctrl {
 
     fun killPid(pid: Int): Boolean = (call("KILLPID " + pid, 2000) ?: "").startsWith("OK")
 
-    /** GETPERAPP <pkg> -> Pair(mode, scope)，"-" 表示未设置 */
-    fun getPerApp(pkg: String): Pair<String, String> {
-        val raw = call("GETPERAPP " + pkg, 2000) ?: return Pair("-", "-")
+    /**
+     * 每应用覆盖配置。
+     *
+     * [timeoutSec] 是这个应用自己的清理时间，0 = 跟随上级（黑名单 5 分钟 / 全局）。
+     * 它比清理方式更常被改 —— 用户想让微信 10 分钟、某游戏 1 分钟，
+     * 但两件事共用一个 perapp.conf 条目，所以一起读一起写。
+     */
+    data class PerApp(val mode: String, val scope: String, val timeoutSec: Int)
+
+    /** GETPERAPP <pkg> -> PerApp，"-" 表示未设置、0 表示跟随 */
+    fun getPerApp(pkg: String): PerApp {
+        val raw = call("GETPERAPP " + pkg, 2000) ?: return PerApp("-", "-", 0)
         val parts = raw.trim().removePrefix("OK").trim().split(" ")
-        return Pair(parts.getOrElse(0) { "-" }, parts.getOrElse(1) { "-" })
+        return PerApp(
+            mode = parts.getOrElse(0) { "-" },
+            scope = parts.getOrElse(1) { "-" },
+            timeoutSec = parts.getOrElse(2) { "0" }.toIntOrNull() ?: 0,
+        )
     }
 
-    fun setPerApp(pkg: String, mode: String, scope: String): Boolean =
-        (call("SETPERAPP " + pkg + " " + mode + " " + scope, 2000) ?: "").startsWith("OK")
+    // 空串会被拼成两个连续空格，daemon 按空格切参数时后面的 scope / timeout 会整体错位，
+    // 所以这里统一把「未设置」写成 "-"。
+    fun setPerApp(pkg: String, mode: String, scope: String, timeoutSec: Int = 0): Boolean {
+        val m = mode.ifEmpty { "-" }
+        val s = scope.ifEmpty { "-" }
+        return (call("SETPERAPP " + pkg + " " + m + " " + s + " " + timeoutSec, 2000) ?: "")
+            .startsWith("OK")
+    }
 
     /** GETPERPROC <procname> -> mode，"-" 表示未设置 */
     fun getPerProc(proc: String): String {
