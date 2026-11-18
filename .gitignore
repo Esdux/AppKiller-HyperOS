@@ -12,6 +12,13 @@ module/bin/appkillerd
 app/local.properties
 local.properties
 
+# 签名密钥与密码（一律不进仓库）
+*.keystore
+*.jks
+*.p12
+*.idsig
+signing.properties
+
 # 临时脚本与侦察产物
 tools/
 *.log
