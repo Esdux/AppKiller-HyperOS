@@ -28,7 +28,10 @@ cp -f "$ROOT/module/bin/appkillerd" "$ROOT/out/appkillerd"
 echo "    产物 $ROOT/out/appkillerd ($(wc -c < "$ROOT/out/appkillerd") 字节)"
 
 # 若已构建管理器 APK，一并打进模块
-APK_SRC="$ROOT/app/app/build/outputs/apk/release/app-release.apk"
+# 优先用 tools/sign_apk.sh 重签过的包：AGP 托管签名在 minSdk 33 下只写 v3 块，
+# 重签过的才同时带 v2 + v3（规范要求）。没有就退回 AGP 产物。
+APK_SRC="$ROOT/out/sign/appkiller.apk"
+[ -f "$APK_SRC" ] || APK_SRC="$ROOT/app/app/build/outputs/apk/release/app-release.apk"
 [ -f "$APK_SRC" ] || APK_SRC="$ROOT/app/app/build/outputs/apk/debug/app-debug.apk"
 if [ -f "$APK_SRC" ]; then
     cp -f "$APK_SRC" "$ROOT/module/bin/appkiller.apk"

@@ -3,6 +3,12 @@
 被系统冻结之后还继续占着 uid、进程槽和内存的后台应用，冻结满阈值就清掉；中途只要被用过就重新计时。
 判定直接读 cgroup，不 hook、不注入、不依赖 LSPosed。
 
+> **兼容性：只面向 HyperOS / MIUI。** 冻结判定读的是 `/proc/<pid>/cgroup` 里的 `frozen` 路径，
+> 这是小米 greeze 的落点；AOSP 原生 freezer 走 cgroup v2 的 `cgroup.freeze`，路径不同，
+> 在原生 Android、LineageOS、Pixel 等系统上本模块判定不到冻结状态，等于不工作。
+> 三星 / OPPO / vivo 等厂商的冻结实现也各不相同，未适配。管理器 App 与名单体系本身与系统无关，
+> 但脱离 HyperOS 就没有可清理的对象。
+
 ## 功能
 
 - **冻结超时清理**：读 `/proc/<pid>/cgroup` 判断冻结（HyperOS 的 greeze 与 AOSP freezer 不是一回事，`State:T` 在 HyperOS 上恒为假），连续冻结超过阈值即清理，中途被使用就重新计时。
@@ -54,7 +60,7 @@ mode 取 `sigkill` / `am_kill` / `force_stop`，per-proc 另多一个 `skip`；�
 
 ## 安装
 
-1. KernelSU / Magisk 刷入 `dist/appkiller-v1.6.zip`（管理器 APK 在刷入阶段装好，不必等开机）
+1. KernelSU / Magisk 刷入 `dist/appkiller-v1.7.zip`（管理器 APK 在刷入阶段装好，不必等开机）
 2. 重启（或等 `service.sh` 拉起守护进程）
 3. 首次进 App 会弹一次 KernelSU 授权；不授权时走本地控制端口，功能仍在
 

@@ -1,6 +1,7 @@
 package com.yg.appkiller.ui.screens
 
-import android.os.Build
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -16,22 +17,33 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircleOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.yg.appkiller.Update
 import com.yg.appkiller.ui.data.DaemonState
 import com.yg.appkiller.ui.theme.isInDarkTheme
 import com.yg.appkiller.ui.util.PageScaffold
 import com.yg.appkiller.ui.util.firstCard
 import com.yg.appkiller.ui.util.nextCard
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text as MiuixText
+import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
@@ -54,6 +66,16 @@ fun HomePage(
     state: DaemonState,
     onRefresh: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var updateTip by remember { mutableStateOf("") }
+    val currentVersion = remember {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull() ?: ""
+    }
+
     PageScaffold(
         title = "AppKiller",
         isBlurEnabled = isBlurEnabled,
@@ -82,12 +104,50 @@ fun HomePage(
             }
         }
 
-        item(key = "device") {
+        item(key = "about") {
             Card(modifier = Modifier.nextCard()) {
                 Column {
-                    BasicComponent(title = "设备型号", summary = Build.MODEL)
-                    BasicComponent(title = "系统版本", summary = Build.DISPLAY)
-                    BasicComponent(title = "Android", summary = Build.VERSION.RELEASE)
+                    // 项目地址与检查更新放在主页最后一张卡：它们是「关于这个 App」的事，
+                    // 不是运行状态的一部分；放前面会挤掉用户第一眼要看的守护状态。
+                    ArrowPreference(
+                        title = "项目地址",
+                        summary = "github.com/Esdux/AppKiller-HyperOS",
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(Update.REPO_URL)),
+                                )
+                            }
+                        },
+                    )
+                    ArrowPreference(
+                        title = "检查正式版更新",
+                        summary = when {
+                            checking -> "检查中…"
+                            updateTip.isNotEmpty() -> updateTip
+                            else -> "当前版本 " + currentVersion
+                        },
+                        onClick = {
+                            if (checking) return@ArrowPreference
+                            checking = true
+                            updateTip = ""
+                            scope.launch {
+                                val res = withContext(Dispatchers.IO) { Update.fetchLatest() }
+                                checking = false
+                                updateTip = when (res) {
+                                    is Update.Result.NotFound -> "还没有发布过正式版"
+                                    is Update.Result.Failed -> "检查失败，确认网络后重试"
+                                    is Update.Result.Ok -> {
+                                        val tag = res.info.tag
+                                        if (tag.isEmpty()) "还没有发布过正式版"
+                                        else if (Update.compare(tag, currentVersion) > 0)
+                                            "发现新版本 " + tag + "，点项目地址下载"
+                                        else "已是最新（" + currentVersion + "）"
+                                    }
+                                }
+                            }
+                        },
+                    )
                 }
             }
         }

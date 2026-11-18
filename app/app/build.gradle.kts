@@ -5,6 +5,30 @@ plugins {
 
 android {
     namespace = "com.yg.appkiller"
+
+    // 正式包用本机统一发布密钥（tools/README.md「Android 应用签名」）。
+    // 密码只从环境变量取，绝不写进这个文件；缺密码时回退 debug 签名，
+    // 这样没有密钥的机器也能编译，只是装出来不能覆盖正式版。
+    signingConfigs {
+        create("release") {
+            val ks = System.getenv("ANDROID_KS")
+                ?: System.getProperty("user.home") + "/my-release.keystore"
+            val pass = System.getenv("ANDROID_KS_PASS")
+            if (pass != null && file(ks).exists()) {
+                storeFile = file(ks)
+                storePassword = pass
+                keyAlias = System.getenv("ANDROID_KS_ALIAS") ?: "mykey"
+                keyPassword = pass
+                // 规范固定 v2 + v3（v1 关、v4 不开）。注意：minSdk 33 时
+                // apksigner 认为 v2 用不上，只写 v3 块——所以交付包一律再走
+                // tools/sign_apk.sh 重签一遍，那个脚本会强制把 v2 也写进去。
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = false
+            }
+        }
+    }
     compileSdk = 37
     compileSdkMinor = 0
     buildToolsVersion = "36.0.0"
@@ -14,8 +38,8 @@ android {
         minSdk = 33
         targetSdk = 37
         // 与 module/module.prop 的 version/versionCode 保持一致，刷模块后能一眼对上
-        versionCode = 15
-        versionName = "1.5"
+        versionCode = 17
+        versionName = "1.7"
 
         // 只打 arm64-v8a：本模块只面向 HyperOS/MIUI 的 arm64 设备，
         // 带上 armeabi-v7a / x86 只会让包里多出几十 MB 用不到的 native 库。
@@ -33,8 +57,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // 用 debug 签名，模块刷入后由 pm install 直接装，不需要额外配置 keystore
-            signingConfig = signingConfigs.getByName("debug")
+            // 有发布密钥就签它，没有就退回 debug（见上面 signingConfigs 的说明）
+            signingConfig = if (signingConfigs.getByName("release").storeFile != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
         debug {
             isMinifyEnabled = false
