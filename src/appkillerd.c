@@ -169,6 +169,7 @@ void cfg_defaults(void) {
     g_cfg.enable                = 1;
     g_cfg.timeout_sec           = 30 * 60;
     g_cfg.blacklist_timeout_sec = 5 * 60;    /* 黑名单：冻结 5 分钟就杀 */
+    g_cfg.force_stop_hold_sec   = 5 * 60;    /* force_stop 杀完压制 5 分钟 */
     g_cfg.interval_ms           = 2000;
     g_cfg.active_adj            = 200;
     g_cfg.min_uid               = 1000;
@@ -202,6 +203,8 @@ static void cfg_assign(const char *k, const char *v) {
     else if (ci_eq(k, "TIMEOUT_SEC"))           g_cfg.timeout_sec = atoi(v);
     else if (ci_eq(k, "BLACKLIST_TIMEOUT_MIN")) g_cfg.blacklist_timeout_sec = (int)(atof(v) * 60.0);
     else if (ci_eq(k, "BLACKLIST_TIMEOUT_SEC")) g_cfg.blacklist_timeout_sec = atoi(v);
+    else if (ci_eq(k, "FORCE_STOP_HOLD_MIN"))   g_cfg.force_stop_hold_sec = (int)(atof(v) * 60.0);
+    else if (ci_eq(k, "FORCE_STOP_HOLD_SEC"))   g_cfg.force_stop_hold_sec = atoi(v);
     else if (ci_eq(k, "INTERVAL_MS"))           g_cfg.interval_ms = atoi(v);
     else if (ci_eq(k, "ACTIVE_ADJ"))            g_cfg.active_adj = atoi(v);
     else if (ci_eq(k, "MIN_UID"))               g_cfg.min_uid = atoi(v);
@@ -1028,6 +1031,131 @@ static int am_command(const char *sub, const char *pkg) {
     return ok;
 }
 
+/* ============================ force_stop 压制窗口 ============================ */
+/*
+ * 为什么单纯 am force-stop 不够：
+ *
+ *   am force-stop 置的是 PackageManager 的 FLAG_STOPPED，AMS 在 startProcessLocked
+ *   之前会拒绝为它启动进程，广播 / Service / Alarm / Job 全被丢弃 —— 这一层是可靠的。
+ *
+ *   但 HyperOS 的厂商后台管理（joyose、com.miui.powerkeeper、云控策略）不走 AMS 这条
+ *   正规路径，它自己按包名 fork 进程，stopped 标志对它无效。于是「force stop 了但几秒
+ *   后又冒出来」在小米设备上是常态，这不是我们代码的问题，是厂商层绕过。
+ *
+ *   所以窗口内再加两道系统级限制，并每轮复检：
+ *     1) am set-standby-bucket restricted —— 把应用压到最严格的待机桶，
+ *        AlarmManager 与 JobScheduler 的调度间隔被拉到最长，网络访问受严格限制；
+ *     2) cmd appops set RUN_ANY_IN_BACKGROUND ignore —— 直接禁掉后台启动权限。
+ *   到期后自动恢复成 default，不留副作用。
+ */
+/* 前置声明：hold_tick 要复用整包清理，而 kill_package 定义在后面 */
+int kill_package(const char *pkg, const char *scope, const char *mode,
+                 int dry_run, int *killed, char *pidlist, size_t pidn);
+
+static hold_t g_hold[MAX_HOLD];
+static int    g_hold_n = 0;
+
+static hold_t *hold_find(const char *pkg) {
+    for (int i = 0; i < g_hold_n; i++)
+        if (!strcmp(g_hold[i].pkg, pkg)) return &g_hold[i];
+    return NULL;
+}
+
+/* 跑一条 shell 命令，只关心成败，不阻塞太久 */
+static void shell_quiet(const char *fmt, const char *arg) {
+    pid_t p = fork();
+    if (p == 0) {
+        int nul = open("/dev/null", O_WRONLY);
+        if (nul >= 0) { dup2(nul, STDOUT_FILENO); dup2(nul, STDERR_FILENO); close(nul); }
+        char cmd[PATH_LEN * 2];
+        snprintf(cmd, sizeof(cmd), fmt, arg);
+        execl("/system/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    if (p < 0) return;
+    for (int i = 0; i < 30; i++) {
+        int st = 0;
+        pid_t r = waitpid(p, &st, WNOHANG);
+        if (r == p) return;
+        if (r < 0) return;
+        usleep(100000);
+    }
+    kill(p, SIGKILL);
+    waitpid(p, NULL, 0);
+}
+
+/* 开始压制：置 stopped + 压待机桶 + 禁后台启动 */
+static void hold_begin(const char *pkg) {
+    if (!pkg || !*pkg) return;
+    if (g_cfg.force_stop_hold_sec <= 0) return;   /* 0 = 不压制，只做一次性 force-stop */
+
+    hold_t *h = hold_find(pkg);
+    if (!h) {
+        if (g_hold_n >= MAX_HOLD) return;
+        h = &g_hold[g_hold_n++];
+        memset(h, 0, sizeof(*h));
+        snprintf(h->pkg, PKG_LEN, "%s", pkg);
+    }
+    h->until = mono_sec() + g_cfg.force_stop_hold_sec;
+
+    shell_quiet("am set-standby-bucket %s restricted", pkg);
+    shell_quiet("cmd appops set %s RUN_ANY_IN_BACKGROUND ignore", pkg);
+    log_msg("hold begin pkg=%s sec=%d", pkg, g_cfg.force_stop_hold_sec);
+}
+
+/* 到期恢复：把窗口内改过的系统设置还原成 default */
+static void hold_end(hold_t *h) {
+    shell_quiet("am set-standby-bucket %s reset", h->pkg);
+    shell_quiet("cmd appops set %s RUN_ANY_IN_BACKGROUND default", h->pkg);
+    log_msg("hold end pkg=%s kills=%d", h->pkg, h->kills);
+}
+
+/* 数这个包此刻有几个进程（含子进程）。用于压制窗口内的复检。 */
+static int hold_count_procs(const char *pkg) {
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    struct dirent *e;
+    int n = 0;
+    size_t plen = strlen(pkg);
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        int pid = atoi(e->d_name);
+        if (pid <= 0) continue;
+        char raw[512];
+        if (read_cmdline(pid, raw, sizeof(raw)) != 0) continue;
+        if (raw[0] == '/' || raw[0] == '[') continue;
+        if (strncmp(raw, pkg, plen) != 0) continue;
+        /* 必须整段匹配：com.foo 不能命中 com.foobar，但 com.foo:push 算 */
+        if (raw[plen] != '\0' && raw[plen] != ':') continue;
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+/* 每轮调用：到期恢复；未到期则复检「又冒出来的进程」立刻再杀。
+ * 复检用的是同一个 force_stop 档，所以再次杀完仍会刷新窗口（持续压制）。 */
+static void hold_tick(void) {
+    if (g_hold_n == 0) return;
+    long long now = mono_sec();
+    for (int i = 0; i < g_hold_n; ) {
+        hold_t *h = &g_hold[i];
+        if (now >= h->until) {
+            hold_end(h);
+            memmove(&g_hold[i], &g_hold[i + 1], (size_t)(g_hold_n - i - 1) * sizeof(hold_t));
+            g_hold_n--;
+            continue;
+        }
+        /* 窗口内复检：这个包又出现进程了 → 说明厂商层绕过 stopped 拉起来了，再杀 */
+        int left = hold_count_procs(h->pkg);
+        if (left > 0) {
+            int k = 0;
+            kill_package(h->pkg, "pkg", "force_stop", 0, &k, NULL, 0);
+            h->kills++;
+            log_msg("hold rekills pkg=%s procs=%d n=%d", h->pkg, left, h->kills);
+        }
+        i++;
+    }
+}
 /* 把冻结中的 pid 移出 /frozen 解冻：冻结态下信号不投递，必须先 thaw 再 kill */
 static void thaw_pid(int pid) {
     char cg[PATH_LEN];
@@ -1241,6 +1369,7 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
          * 但系统还挂着它的 ServiceRecord"的情况，这也是这两个档存在的意义。 */
         if (!strcmp(mode, "am_kill") || !strcmp(mode, "force_stop")) {
             int ok = am_command(!strcmp(mode, "am_kill") ? "kill" : "force-stop", pkg);
+            if (!strcmp(mode, "force_stop")) hold_begin(pkg);
             usleep(300000);
             int left = sweep_rounds(pkg, scope, killed, NULL, 0, 3);
             if (left) log_msg("sweep pkg=%s survivors killed=%d", pkg, killed ? *killed : 0);
@@ -1281,6 +1410,9 @@ int kill_package(const char *pkg, const char *scope, const char *mode,
     if (!strcmp(mode, "force_stop")) {
         am_command("force-stop", pkg);
         usleep(200000);
+        /* 压制窗口：stopped 标志挡不住厂商后台管理，这里再加两道系统级限制，
+         * 并在窗口内每轮复检（见 hold_tick）。 */
+        hold_begin(pkg);
     }
 
     /* 收尾：这几百毫秒里被拉起来的，一并按住杀掉 */
@@ -1465,6 +1597,18 @@ void write_state(void) {
                 dur, rem, bto, b->protected ? "true" : "false");
     }
     fprintf(f, "%s],\n", g_bg_n ? "\n  " : "");
+
+    /* force_stop 压制窗口：管理器 App 可以显示「已压制 · 剩余 N 秒」，
+     * 用户才知道为什么这个应用杀完之后一直没回来。 */
+    fprintf(f, "  \"holding\": [");
+    for (int i = 0; i < g_hold_n; i++) {
+        hold_t *h = &g_hold[i];
+        long long rem = h->until - now;
+        if (rem < 0) rem = 0;
+        fprintf(f, "%s\n    {\"pkg\": \"%s\", \"remain_sec\": %lld, \"kills\": %d}",
+                i ? "," : "", h->pkg, rem, h->kills);
+    }
+    fprintf(f, "%s],\n", g_hold_n ? "\n  " : "");
 
     fprintf(f, "  \"history\": [");
     int total = g_hist_n > MAX_HISTORY ? MAX_HISTORY : g_hist_n;
@@ -2028,6 +2172,7 @@ static int run_daemon(void) {
         if (g_cfg.enable) {
             scan_round();
             decide_round(g_cfg.dry_run);
+            hold_tick();      /* force_stop 压制窗口：到期恢复 / 复检再杀 */
         }
 
         long long now = mono_sec();

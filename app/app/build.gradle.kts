@@ -13,8 +13,9 @@ android {
         applicationId = "com.yg.appkiller"
         minSdk = 33
         targetSdk = 37
-        versionCode = 13
-        versionName = "1.3"
+        // 与 module/module.prop 的 version/versionCode 保持一致，刷模块后能一眼对上
+        versionCode = 15
+        versionName = "1.5"
 
         // 只打 arm64-v8a：本模块只面向 HyperOS/MIUI 的 arm64 设备，
         // 带上 armeabi-v7a / x86 只会让包里多出几十 MB 用不到的 native 库。

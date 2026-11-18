@@ -22,6 +22,7 @@
 #define MAX_HISTORY      32
 #define MAX_PERAPP       256
 #define MAX_PERPROC      512
+#define MAX_HOLD         128
 #define MAX_LINE        512
 #define PKG_LEN          96
 #define PATH_LEN        320
@@ -36,6 +37,7 @@ typedef struct {
     int  enable;
     int  timeout_sec;
     int  blacklist_timeout_sec;    /* 黑名单专属清理时间：命中黑名单就用它，不等全局 */
+    int  force_stop_hold_sec;      /* force_stop 的压制窗口：这段时间内持续阻止系统拉起 */
     int  interval_ms;
     int  active_adj;
     int  min_uid;
@@ -107,6 +109,17 @@ typedef struct {
     char proc[PKG_LEN];     /* 完整进程名，如 com.tencent.mm:push */
     char mode[SMALL_LEN];   /* sigkill | am_kill | force_stop | skip */
 } perproc_t;
+
+/* force_stop 的压制记录：窗口内持续压制 + 复检，到期恢复系统设置。
+ * 为什么需要它：am force-stop 只置 stopped 标志，能挡住广播/服务/Alarm/Job，
+ * 但 HyperOS 自己的后台管理（joyose/miui 电管）会绕过 stopped 直接把进程 fork 回来。
+ * 所以窗口内额外把 standby bucket 压到 restricted、禁掉 RUN_ANY_IN_BACKGROUND，
+ * 并在每轮扫描时复检「又冒出来的进程」立刻再杀。 */
+typedef struct {
+    char      pkg[PKG_LEN];
+    long long until;       /* 压制到期的单调时钟秒 */
+    int       kills;       /* 窗口内已复杀次数 */
+} hold_t;
 
 extern config_t g_cfg;
 extern char     g_moddir[PATH_LEN];
