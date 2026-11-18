@@ -13,7 +13,7 @@
 - **名单体系**：硬保护 / 黑名单（强制清理）/ 白名单（豁免）/ 输入法 / persistent / 系统应用六层判定，与 Cirno 语义对齐；系统应用判定取 `uid < 10000`、App 生成清单、`pm list packages -s` 三路并集。
 - **运行列表**：全部后台应用分两段，上段「即将去死」= 已冻结且正在计时，下段「未冻结」= 系统尚未回收、不参与清理。
 - **二级页**：读 APK 二进制清单列出全部声明进程，叠加实时运行状态。
-- **名单导入**：Cirno 直接读 `/data/system/Cirno/ApplicationSettings.json`（固定路径，普通文件选择器进不去）；A0 后台优化用系统文件选择器挑 `config.conf`。两者都弹候选框勾选。
+- **名单导入**：Cirno 读 `/data/system/Cirno/ApplicationSettings.json`，A0 读 `/sdcard/Android/A0_Memory/config.conf`。配置存在就直接解析并弹候选框勾选；候选框右上角的文件夹按钮可以换一份配置，配置不存在时也走系统文件选择器。
 - **热刷入模块**：设置页选一个模块 zip，应用自己解压覆盖并重启守护进程，不用重启手机，名单与配置保留。
 
 ## A0 名单映射

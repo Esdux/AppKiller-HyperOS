@@ -172,14 +172,11 @@ fun SettingsPage(
         }
     }
 
-    // Cirno 名单不再走 SAF 选文件：配置固定写在 /data/system/Cirno/ApplicationSettings.json，
-    // 普通文件选择器根本进不去 /data/system。这里直接读，读完弹候选框让用户勾。
+    // Cirno / A0 名单导入：默认路径存在就直接读（省掉翻文件管理器这一步），
+    // 不存在或用户想换一份配置时，点候选框右上角的文件夹按钮走系统选择器。
     var showCirno by remember { mutableStateOf(false) }
-    // A0 后台优化的名单导入：由用户自己挑 config.conf，不走固定路径直读 ——
-    // 他可能把配置备份到了别处，也可能改过名字。选中后把文本交给候选框解析。
-    var showA0 by remember { mutableStateOf(false) }
-    var a0Text by remember { mutableStateOf("") }
-    val a0Launcher = rememberLauncherForActivityResult(
+    var cirnoPicked by remember { mutableStateOf("") }
+    val cirnoPickLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -189,7 +186,23 @@ fun SettingsPage(
         if (text.isNullOrBlank()) {
             tip = "读取失败：文件为空或无法读取"
         } else {
-            a0Text = text
+            cirnoPicked = text
+            showCirno = true
+        }
+    }
+    var showA0 by remember { mutableStateOf(false) }
+    var a0Picked by remember { mutableStateOf("") }
+    val a0PickLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val text = runCatching {
+            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+        }.getOrNull()
+        if (text.isNullOrBlank()) {
+            tip = "读取失败：文件为空或无法读取"
+        } else {
+            a0Picked = text
             showA0 = true
         }
     }
@@ -316,13 +329,13 @@ fun SettingsPage(
                     )
                     ArrowPreference(
                         title = "导入 Cirno 名单",
-                        summary = "直接读取 Cirno 的配置，勾选要导入的应用",
-                        onClick = { showCirno = true },
+                        summary = "存在就直接读，也可在候选框右上角换文件",
+                        onClick = { cirnoPicked = ""; showCirno = true },
                     )
                     ArrowPreference(
                         title = "导入 A0 后台优化名单",
-                        summary = "选 A0 的 config.conf；KILL 存为 force stop，WHITE 存为白名单或跳过不清理",
-                        onClick = { a0Launcher.launch(arrayOf("text/plain", "*/*")) },
+                        summary = "存在就直接读，也可在候选框右上角换文件；KILL 存为 force stop，WHITE 存为白名单或跳过不清理",
+                        onClick = { a0Picked = ""; showA0 = true },
                     )
                 }
                 if (tip.isNotEmpty()) {
@@ -424,6 +437,8 @@ fun SettingsPage(
 
     CirnoImportDialog(
         show = showCirno,
+        pickedText = cirnoPicked,
+        onPickFile = { cirnoPickLauncher.launch(arrayOf("text/plain", "*/*")) },
         onDismiss = { showCirno = false },
         onImported = { msg ->
             showCirno = false
@@ -435,7 +450,8 @@ fun SettingsPage(
 
     A0ImportDialog(
         show = showA0,
-        text = a0Text,
+        pickedText = a0Picked,
+        onPickFile = { a0PickLauncher.launch(arrayOf("text/plain", "*/*")) },
         onDismiss = { showA0 = false },
         onImported = { msg ->
             showA0 = false

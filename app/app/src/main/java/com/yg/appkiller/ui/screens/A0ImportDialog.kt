@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
@@ -14,6 +15,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.state.ToggleableState
@@ -26,9 +28,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Checkbox
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text as MiuixText
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Folder
 import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
@@ -37,9 +43,9 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 /**
  * A0 后台优化（A0_Memory）名单导入的候选框。
  *
- * 配置文本由调用方通过文件选择器读进来（[text] 参数），本组件只负责解析与勾选。
- * 不走固定路径直读：用户可能把配置备份到了别处，也可能改过名字 ——
- * 让他自己挑文件比猜路径可靠。
+ * 读取策略与 Cirno 一致：A0 的配置固定写在 /sdcard/Android/A0_Memory/config.conf，
+ * 存在就直接读（省掉「翻文件管理器找路径」这一步）；不存在、或用户想换一份配置时，
+ * 点右上角的文件夹按钮走系统文件选择器 —— 选中的文本通过 [pickedText] 传进来。
  *
  * 格式映射（用户指定，仅用于适配）：
  *   KILL <包名>           → per-app，清理方式 force_stop
@@ -55,7 +61,9 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 @Composable
 fun A0ImportDialog(
     show: Boolean,
-    text: String,
+    /** 用户通过文件选择器选中的配置文本；空串表示「没选过」，此时走默认路径直读 */
+    pickedText: String,
+    onPickFile: () -> Unit,
     onDismiss: () -> Unit,
     onImported: (String) -> Unit,
 ) {
@@ -72,21 +80,28 @@ fun A0ImportDialog(
     // 勾选集合：前缀区分三类，避免包名与进程名同名时冲突
     val selected = remember { mutableStateListOf<String>() }
 
-    // 只解析一次：text 变化（用户重新选了个文件）才重算。放在 remember(text) 里而不是
-    // LaunchedEffect 里，避免每次重组都把勾选状态清空。
-    LaunchedEffect(text) {
+    // pickedText 变化（用户重新选了个文件）才重算，避免每次重组都清空勾选。
+    // pickedText 为空时读默认路径；默认路径也没有就提示用户点右上角选文件。
+    LaunchedEffect(pickedText) {
         loading = true
         error = ""
         apps.clear(); procs.clear(); white.clear(); selected.clear()
-        val result = withContext(Dispatchers.IO) {
+        val pair = withContext(Dispatchers.IO) {
             runCatching {
+                val text = if (pickedText.isNotEmpty()) pickedText else ModuleRepo.readA0Config()
+                if (text.isNullOrBlank()) return@runCatching (null to true)
                 val (a, p, w) = ModuleRepo.parseA0Config(text)
-                if (a.isEmpty() && p.isEmpty() && w.isEmpty()) return@runCatching null
-                Triple(a, p, w)
+                if (a.isEmpty() && p.isEmpty() && w.isEmpty()) return@runCatching (null to false)
+                Triple(a, p, w) to false
             }.getOrNull()
         }
+        val result = pair?.first
+        val noFile = pair?.second ?: false
         if (result == null) {
-            error = "这个文件里没有 KILL / WHITE 条目。请选 A0 后台优化的 config.conf。"
+            error = if (noFile)
+                "没找到 /sdcard/Android/A0_Memory/config.conf。点右上角的文件夹按钮选一份配置。"
+            else
+                "这个文件里没有 KILL / WHITE 条目。点右上角换一份 A0 的 config.conf。"
         } else {
             apps.addAll(result.first)
             procs.addAll(result.second)
@@ -109,6 +124,28 @@ fun A0ImportDialog(
         onDismissRequest = onDismiss,
     ) {
         Column {
+            // 右上角换文件的入口。WindowDialog 的标题栏是固定结构、塞不进自定义控件，
+            // 所以放在内容区第一行并右对齐 —— 视觉位置同样是「框的右上角」，
+            // 且不会因为标题过长被挤掉。
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = DshSpacing.Tight),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MiuixText(
+                    text = if (pickedText.isNotEmpty()) "已选文件" else "默认路径配置",
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onPickFile) {
+                    Icon(
+                        imageVector = MiuixIcons.Folder,
+                        contentDescription = "选择配置文件",
+                        tint = colorScheme.primary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
             if (error.isNotEmpty()) {
                 MiuixText(
                     text = error,

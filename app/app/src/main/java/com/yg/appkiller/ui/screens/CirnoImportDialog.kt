@@ -38,9 +38,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Checkbox
+import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Switch
 import top.yukonga.miuix.kmp.basic.Text as MiuixText
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Folder
 import top.yukonga.miuix.kmp.theme.LocalDismissState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
@@ -49,10 +53,11 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 /**
  * Cirno 名单导入的候选框。
  *
- * 为什么不再走 SAF 选文件：Cirno 的配置固定写在 /data/system/Cirno/ApplicationSettings.json，
- * 位置不会变、格式不会变。让用户自己去文件管理器里翻出这个文件，等于把「知道路径」
- * 这件事外包给用户 —— 而且普通文件选择器根本进不到 /data/system。
- * 现在直接读，读完把条目摆出来让用户挑。
+ * 读取策略：Cirno 的配置固定写在 /data/system/Cirno/ApplicationSettings.json，位置不会变、
+ * 格式不会变。存在就直接读 —— 让用户自己去文件管理器里翻出这个文件，等于把「知道路径」
+ * 这件事外包给用户，而且普通文件选择器根本进不到 /data/system。
+ * 不存在、或用户想用一份导出的备份时，点右上角的文件夹按钮走系统文件选择器，
+ * 选中的文本通过 [pickedText] 传进来。
  *
  * 三条设计取舍：
  * 1. **默认全选**。用户点「导入 Cirno 名单」的意图就是「把 Cirno 那套搬过来」，
@@ -64,6 +69,9 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 @Composable
 fun CirnoImportDialog(
     show: Boolean,
+    /** 用户通过文件选择器选中的配置文本；空串表示「没选过」，此时走默认路径直读 */
+    pickedText: String,
+    onPickFile: () -> Unit,
     onDismiss: () -> Unit,
     onImported: (String) -> Unit,
 ) {
@@ -77,21 +85,32 @@ fun CirnoImportDialog(
     val black = remember { mutableStateListOf<CirnoCandidate>() }
     val selected = remember { mutableStateListOf<String>() }
 
-    LaunchedEffect(Unit) {
-        val result = withContext(Dispatchers.IO) {
+    // pickedText 变化（用户重新选了个文件）才重算，避免每次重组都清空勾选。
+    // pickedText 为空时读默认路径；默认路径也没有就提示用户点右上角选文件。
+    LaunchedEffect(pickedText) {
+        loading = true
+        error = ""
+        white.clear(); black.clear(); selected.clear()
+        val pair = withContext(Dispatchers.IO) {
             runCatching {
-                val json = ModuleRepo.readCirnoConfig() ?: return@runCatching null
+                val json = if (pickedText.isNotEmpty()) pickedText else ModuleRepo.readCirnoConfig()
+                if (json.isNullOrBlank()) return@runCatching (null to true)
                 val (w, b) = ModuleRepo.parseCirnoApps(json)
-                if (w.isEmpty() && b.isEmpty()) return@runCatching null
+                if (w.isEmpty() && b.isEmpty()) return@runCatching (null to false)
                 // 应用名与「是否已安装」一次算完，别在列表项里查 pm
                 val labels = AppRepo.labelMap(context.applicationContext)
                 val wl = w.map { CirnoCandidate(it, labels[it], it in labels) }
                 val bl = b.map { CirnoCandidate(it, labels[it], it in labels) }
-                wl to bl
+                (wl to bl) to false
             }.getOrNull()
         }
+        val result = pair?.first
+        val noFile = pair?.second ?: false
         if (result == null) {
-            error = "没读到 Cirno 配置。请确认已安装 Cirno 并至少配置过一次名单。"
+            error = if (noFile)
+                "没找到 /data/system/Cirno/ApplicationSettings.json。点右上角的文件夹按钮选一份配置。"
+            else
+                "这个文件里没有 whiteApps / blackApps。点右上角换一份 Cirno 配置。"
         } else {
             white.addAll(result.first)
             black.addAll(result.second)
@@ -112,6 +131,28 @@ fun CirnoImportDialog(
         onDismissRequest = onDismiss,
     ) {
         Column {
+            // 右上角换文件的入口。WindowDialog 的标题栏是固定结构、塞不进自定义控件，
+            // 所以放在内容区第一行并右对齐 —— 视觉位置同样是「框的右上角」，
+            // 且不会因为标题过长被挤掉。
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = DshSpacing.Tight),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MiuixText(
+                    text = if (pickedText.isNotEmpty()) "已选文件" else "默认路径配置",
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = colorScheme.onSurfaceVariantSummary,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onPickFile) {
+                    Icon(
+                        imageVector = MiuixIcons.Folder,
+                        contentDescription = "选择配置文件",
+                        tint = colorScheme.primary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
             if (error.isNotEmpty()) {
                 MiuixText(
                     text = error,
