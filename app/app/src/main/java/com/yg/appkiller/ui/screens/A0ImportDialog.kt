@@ -30,6 +30,7 @@ import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.yg.appkiller.A0Config
 import com.yg.appkiller.AppRepo
 import com.yg.appkiller.ModuleRepo
 import com.yg.appkiller.ui.util.DshSpacing
@@ -58,10 +59,11 @@ import top.yukonga.miuix.kmp.window.WindowDialog
  * 存在就直接读（省掉「翻文件管理器找路径」这一步）；不存在、或用户想换一份配置时，
  * 点右上角的文件夹按钮走系统文件选择器 —— 选中的文本通过 [pickedText] 传进来。
  *
- * 格式映射（用户指定，仅用于适配）：
- *   KILL <包名>           → per-app，清理方式 force_stop
- *   KILL <包名>:<子进程>  → per-proc，清理方式 force_stop
- *   WHITE <包名>          → 白名单；勾了「存为跳过不清理」则额外写 per-proc skip
+ * 格式映射（用户指定，仅用于适配）—— **带不带冒号决定粒度，不需要再选**：
+ *   KILL  <包名>           → per-app，清理方式 force_stop
+ *   KILL  <包名>:<子进程>  → per-proc，清理方式 force_stop
+ *   WHITE <包名>           → 白名单（protect.list）
+ *   WHITE <包名>:<子进程>  → per-proc，清理方式 skip（只跳过这个进程）
  *
  * 四条设计取舍：
  * 1. **按包名分组，一个应用只出现一次**。A0 的名单是按「条目」列的，同一个包常有
@@ -86,8 +88,6 @@ fun A0ImportDialog(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf("") }
     var merge by remember { mutableStateOf(true) }
-    // 白名单落地方式：false = 写白名单（推荐），true = 写 per-proc 跳过不清理
-    var whiteAsSkip by remember { mutableStateOf(false) }
     val groups = remember { mutableStateListOf<A0Group>() }
     // 展开的包名集合：默认全部折叠，几百条平铺出来没法用
     val expanded = remember { mutableStateListOf<String>() }
@@ -104,11 +104,11 @@ fun A0ImportDialog(
             runCatching {
                 val text = if (pickedText.isNotEmpty()) pickedText else ModuleRepo.readA0Config()
                 if (text.isNullOrBlank()) return@runCatching (null to true)
-                val (a, p, w) = ModuleRepo.parseA0Config(text)
-                if (a.isEmpty() && p.isEmpty() && w.isEmpty()) return@runCatching (null to false)
+                val cfg = ModuleRepo.parseA0Config(text)
+                if (cfg.isEmpty) return@runCatching (null to false)
                 // 应用名一次算完，别在列表项里逐个查 pm
                 val labels = AppRepo.labelMap(context.applicationContext)
-                (buildA0Groups(a, p, w, labels) to false)
+                (buildA0Groups(cfg, labels) to false)
             }.getOrNull()
         }
         val result = pair?.first
@@ -192,7 +192,6 @@ fun A0ImportDialog(
                             items(g.items, key = { "i-" + it.key }) { it ->
                                 A0ItemRow(
                                     item = it,
-                                    whiteAsSkip = whiteAsSkip,
                                     checked = it.key in selected,
                                     onToggle = {
                                         if (!selected.remove(it.key)) selected.add(it.key)
@@ -204,14 +203,6 @@ fun A0ImportDialog(
                 }
 
                 Row(modifier = Modifier.fillMaxWidth().padding(top = DshSpacing.Block)) {
-                    MiuixText(
-                        text = "白名单存为跳过不清理",
-                        style = MiuixTheme.textStyles.body2,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Switch(checked = whiteAsSkip, onCheckedChange = { whiteAsSkip = it })
-                }
-                Row(modifier = Modifier.fillMaxWidth().padding(top = DshSpacing.Compact)) {
                     MiuixText(
                         text = "覆盖现有名单",
                         style = MiuixTheme.textStyles.body2,
@@ -237,10 +228,11 @@ fun A0ImportDialog(
                         val a = selected.filter { it.startsWith("a:") }.map { it.removePrefix("a:") }
                         val p = selected.filter { it.startsWith("p:") }.map { it.removePrefix("p:") }
                         val w = selected.filter { it.startsWith("w:") }.map { it.removePrefix("w:") }
+                        val wp = selected.filter { it.startsWith("x:") }.map { it.removePrefix("x:") }
                         // 写盘要 fork 好几次 su，必须离开主线程，否则弹窗会卡住不动
                         scope.launch {
                             val r = withContext(Dispatchers.IO) {
-                                ModuleRepo.importA0Selection(a, p, w, whiteAsSkip, merge)
+                                ModuleRepo.importA0Selection(a, p, w, wp, merge)
                             }
                             onImported(
                                 "已导入 " + r.first + " 个整包 / " + r.second + " 个进程 / " + r.third + " 个白名单"
@@ -254,9 +246,9 @@ fun A0ImportDialog(
     }
 }
 
-/** A0 里的一条：整包 KILL / 子进程 KILL / 白名单 */
+/** A0 里的一条：整包 KILL / 子进程 KILL / 整包白名单 / 子进程跳过 */
 private data class A0Item(
-    /** a = 整包，p = 子进程，w = 白名单；同时作为勾选 key 的前缀 */
+    /** a = 整包清理，p = 子进程清理，w = 整包白名单，x = 子进程跳过；同时作为勾选 key 的前缀 */
     val kind: String,
     /** 整包与白名单是包名，子进程是 pkg:proc */
     val value: String,
@@ -281,25 +273,28 @@ private data class A0Group(
  * 组按包名排序，应用名只做显示。
  */
 private fun buildA0Groups(
-    apps: List<String>,
-    procs: List<String>,
-    white: List<String>,
+    cfg: A0Config,
     labels: Map<String, String>,
 ): List<A0Group> {
     // LinkedHashMap 保留首次出现顺序，后面再统一按包名排序
     val map = LinkedHashMap<String, MutableList<A0Item>>()
-    for (pkg in apps) map.getOrPut(pkg) { mutableListOf() }.add(A0Item("a", pkg))
-    for (proc in procs) {
+    for (pkg in cfg.apps) map.getOrPut(pkg) { mutableListOf() }.add(A0Item("a", pkg))
+    for (proc in cfg.procs) {
         val pkg = proc.substringBefore(':')
         if (pkg.isEmpty()) continue
         map.getOrPut(pkg) { mutableListOf() }.add(A0Item("p", proc))
     }
-    for (pkg in white) map.getOrPut(pkg) { mutableListOf() }.add(A0Item("w", pkg))
+    for (pkg in cfg.white) map.getOrPut(pkg) { mutableListOf() }.add(A0Item("w", pkg))
+    for (proc in cfg.whiteProcs) {
+        val pkg = proc.substringBefore(':')
+        if (pkg.isEmpty()) continue
+        map.getOrPut(pkg) { mutableListOf() }.add(A0Item("x", proc))
+    }
     return map.entries
         .sortedBy { it.key }
         .map { (pkg, items) ->
             val ordered = items.sortedWith(
-                compareBy({ it.kind != "a" }, { it.kind != "p" }, { it.value })
+                compareBy({ it.kind != "a" }, { it.kind != "p" }, { it.kind != "w" }, { it.value })
             )
             A0Group(pkg, labels[pkg], ordered)
         }
@@ -373,13 +368,15 @@ private fun A0GroupRow(
     }
 }
 
-/** 组摘要：整包 / N 个子进程 / 白名单，只列存在的 */
+/** 组摘要：整包清理 / N 个子进程清理 / 白名单 / N 个进程跳过，只列存在的 */
 private fun summaryOf(group: A0Group): String {
-    val parts = ArrayList<String>(3)
-    if (group.items.any { it.kind == "a" }) parts.add("整包")
-    val procCount = group.items.count { it.kind == "p" }
-    if (procCount > 0) parts.add(procCount.toString() + " 个子进程")
+    val parts = ArrayList<String>(4)
+    if (group.items.any { it.kind == "a" }) parts.add("整包清理")
+    val killProcs = group.items.count { it.kind == "p" }
+    if (killProcs > 0) parts.add(killProcs.toString() + " 个子进程清理")
     if (group.items.any { it.kind == "w" }) parts.add("白名单")
+    val skipProcs = group.items.count { it.kind == "x" }
+    if (skipProcs > 0) parts.add(skipProcs.toString() + " 个进程跳过")
     return parts.joinToString(" · ")
 }
 
@@ -387,7 +384,6 @@ private fun summaryOf(group: A0Group): String {
 @Composable
 private fun A0ItemRow(
     item: A0Item,
-    whiteAsSkip: Boolean,
     checked: Boolean,
     onToggle: () -> Unit,
 ) {
@@ -402,9 +398,13 @@ private fun A0ItemRow(
             title = item.value.substringAfter(':', "");
             subtitle = "子进程 → force stop";
         }
+        "w" -> {
+            title = "整包白名单";
+            subtitle = "→ 不清理";
+        }
         else -> {
-            title = "白名单";
-            subtitle = if (whiteAsSkip) "→ 跳过不清理" else "→ 白名单";
+            title = item.value.substringAfter(':', "");
+            subtitle = "子进程 → 跳过不清理";
         }
     }
     Row(

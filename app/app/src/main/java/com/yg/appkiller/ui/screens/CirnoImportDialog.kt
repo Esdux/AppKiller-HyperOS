@@ -188,25 +188,14 @@ fun CirnoImportDialog(
 
                 Spacer(Modifier.height(DshSpacing.Block))
 
-                // 合并 / 覆盖：覆盖会丢现有名单，所以放在勾选区下面、紧邻按钮，
-                // 不放到标题栏里 —— 那里容易被当成装饰。
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        MiuixText(
-                            text = if (merge) "合并到现有名单" else "覆盖现有名单",
-                            style = MiuixTheme.textStyles.body1,
-                            fontWeight = FontWeight.Medium,
-                        )
-                        MiuixText(
-                            text = if (merge) "保留现有条目，把勾选项加进去"
-                            else "先清空现有白/黑名单，只保留勾选项",
-                            style = MiuixTheme.textStyles.footnote2,
-                            color = colorScheme.onSurfaceVariantSummary,
-                        )
-                    }
+                // 覆盖开关：与 A0 导入保持同一个形态 —— 默认合并，打开才覆盖。
+                // 覆盖会丢现有名单，所以放勾选区下面、紧邻按钮，不塞进标题栏（那里容易被当成装饰）。
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    MiuixText(
+                        text = "覆盖现有名单",
+                        style = MiuixTheme.textStyles.body2,
+                        modifier = Modifier.weight(1f),
+                    )
                     Switch(checked = !merge, onCheckedChange = { merge = !it })
                 }
             }

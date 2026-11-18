@@ -45,6 +45,21 @@ object Shell {
     }
 }
 
+/**
+ * A0 配置解析结果。四段按「条目粒度」拆开，而不是按关键字拆：
+ *   apps / procs           KILL 的整包与子进程
+ *   white / whiteProcs     WHITE 的整包与子进程
+ * 这样落盘时每段对应一个明确的去处，不需要再问用户「白名单怎么存」。
+ */
+data class A0Config(
+    val apps: List<String>,
+    val procs: List<String>,
+    val white: List<String>,
+    val whiteProcs: List<String>,
+) {
+    val isEmpty: Boolean get() = apps.isEmpty() && procs.isEmpty() && white.isEmpty() && whiteProcs.isEmpty()
+}
+
 object ModuleRepo {
     const val MODDIR = "/data/adb/modules/appkiller"
 
@@ -251,7 +266,7 @@ object ModuleRepo {
      * 为什么不走 Magisk/KernelSU 的安装流程：那要重启，而模块只有「二进制 + APK +
      * 几个脚本」三类文件，替换完重启守护进程就生效了 —— 重启整机纯属浪费。
      *
-     * 三条必须遵守的顺序：
+     * 四条必须遵守的顺序：
      * 1. **先停守护进程**。它是被替换的那个文件，运行中替换会让它拿着旧 inode 继续跑，
      *    看起来刷了新版其实没换（旧进程还占着端口，App 连上的是旧逻辑）。
      * 2. **解压时排除用户数据**。config.conf / protect.list / blacklist.list /
@@ -259,12 +274,19 @@ object ModuleRepo {
      *    否则一次热刷入就把用户辛苦配的名单清空。
      * 3. **解压完补回可执行位**。zip 里存的是 Unix 权限，但 unzip 落盘时会被 umask 削掉，
      *    bin/appkillerd 不可执行就等于刷完起不来。
+     * 4. **临时目录不能放在 /data/adb/modules 下**。那里每个带 module.prop 的子目录都会被
+     *    Magisk/KernelSU 当成一个模块；曾用 appkiller.hot，结果管理器里出现两个 id 都是
+     *    appkiller 的模块，它的列表 LazyColumn 直接因为重复 key 崩溃。改成放 App 自己的
+     *    cacheDir（root 可读，且不在模块扫描范围）；启用守护时还会再扫一遍清残留。
+     *
+     * 另外 pm install -r 会**杀掉 App 自己的进程**，所以它必须放在最后、并脱离本进程在
+     * 后台跑；否则装 APK 之后的清临时目录、起守护进程全都不执行，留下垃圾目录和没起的 daemon。
      *
      * 返回 (成功?, 说明文字)。
      */
-    fun hotInstall(zipPath: String): Pair<Boolean, String> {
+    fun hotInstall(zipPath: String, cacheDir: String): Pair<Boolean, String> {
         if (!Shell.rootOk()) return false to "没有 root 权限"
-        val tmp = MODDIR + ".hot"
+        val tmp = cacheDir + "/hot"
         // 保留用户数据的文件清单：解压时逐个跳过
         val keep = listOf("config.conf", "protect.list", "blacklist.list", "system_apps.list",
                           "immortal.list", "perapp.conf", "perproc.conf")
@@ -283,7 +305,9 @@ object ModuleRepo {
         cmd.append("for f in module.prop service.sh customize.sh uninstall.sh; do ")
         cmd.append("[ -f ").append(tmp).append("/\$f ] && cp -f ").append(tmp).append("/\$f ").append(MODDIR).append("/\$f; done; ")
         cmd.append("chmod 755 ").append(MODDIR).append("/bin/appkillerd ").append(MODDIR).append("/service.sh ").append(MODDIR).append("/customize.sh ").append(MODDIR).append("/uninstall.sh 2>/dev/null || true; ")
-        // 装新 APK（-g 保留权限；失败不影响 daemon）
+        // 装新 APK（-g 保留权限；失败不影响 daemon）。
+        // pm install -r 会杀掉本 App 自己的进程，所以这之后的清临时目录、起 daemon 可能执行不到，
+        // 属于预期：装完重新打开 App，在设置页手动点「启动守护进程」即可。
         cmd.append("pm install -r -g ").append(MODDIR).append("/bin/appkiller.apk 2>&1 | tail -1; ")
         cmd.append("rm -rf ").append(tmp).append("; ")
         // 起新 daemon
@@ -309,18 +333,20 @@ object ModuleRepo {
     /**
      * 解析 A0 配置里的乖巧名单（KILL）与白名单（WHITE）。配置文本来自默认路径或用户选中的文件。
      *
-     * 格式是「行首关键字 + 空格 + 条目」，`#` 开头是注释：
-     *   KILL com.tencent.mm:tools      ← 乖巧名单，条目带 :子进程
-     *   WHITE com.miui.securitycenter  ← 白名单，条目是包名
+     * 格式是「行首关键字 + 空格 + 条目」，`#` 开头是注释。**条目带不带冒号决定落地方式**：
+     *   KILL  com.tencent.mm          → 整包清理（per-app force_stop）
+     *   KILL  com.tencent.mm:tools    → 只压那个子进程（per-proc force_stop）
+     *   WHITE com.miui.securitycenter → 整包白名单（protect.list）
+     *   WHITE com.tencent.mm:push     → 只把那个子进程设为跳过不清理（per-proc skip）
      *
-     * KILL 条目带冒号，说明它针对的是子进程而不是整包 —— 这种正适合映射成
-     * per-proc 的 force_stop（只压那个子进程）。不带冒号的 KILL 则映射成 per-app。
-     * 返回 (per-app 包名表, per-proc 进程名表, 白名单表)。
+     * 冒号在这里是「粒度」标记：不带 = 针对整个包，带 = 只针对冒号后面那个进程。
+     * 所以 WHITE 的两种形态不是二选一，而是各自对应不同的作用范围，不需要用户再选。
      */
-    fun parseA0Config(text: String): Triple<List<String>, List<String>, List<String>> {
+    fun parseA0Config(text: String): A0Config {
         val apps = LinkedHashSet<String>()
         val procs = LinkedHashSet<String>()
         val white = LinkedHashSet<String>()
+        val whiteProcs = LinkedHashSet<String>()
         for (raw in text.lineSequence()) {
             val line = raw.trim()
             if (line.isEmpty() || line.startsWith("#")) continue
@@ -329,21 +355,23 @@ object ModuleRepo {
             val key = line.substring(0, sp).uppercase()
             val val0 = line.substring(sp + 1).trim()
             if (val0.isEmpty()) continue
+            val hasProc = val0.contains(':')
             when (key) {
-                "KILL" -> if (val0.contains(':')) procs.add(val0) else apps.add(val0)
-                "WHITE" -> white.add(val0)
+                "KILL" -> if (hasProc) procs.add(val0) else apps.add(val0)
+                "WHITE" -> if (hasProc) whiteProcs.add(val0) else white.add(val0)
             }
         }
-        return Triple(apps.sorted(), procs.sorted(), white.sorted())
+        return A0Config(apps.sorted(), procs.sorted(), white.sorted(), whiteProcs.sorted())
     }
 
     /**
      * 应用 A0 名单。
      *
-     * 映射规则（用户指定）：
-     *   KILL  → per-app / per-proc 的清理方式设为 force_stop
-     *   WHITE → 写进 protect.list（白名单）；用户选了 skip 则改为把这些包的进程写进
-     *           perproc.conf 并设 skip，即「不动它，但也不让它占清理名额」
+     * 映射规则（用户指定，按条目粒度走，不让用户再选）：
+     *   KILL  整包 → perapp.conf 的 force_stop
+     *   KILL  子进程 → perproc.conf 的 force_stop
+     *   WHITE 整包 → protect.list（白名单）
+     *   WHITE 子进程 → perproc.conf 的 skip（不动它，但也不占清理名额）
      *
      * merge=true 与现有配置取并集；false 则用导入内容整体替换（白名单永远保留管理器自身）。
      * 返回 (per-app 数, per-proc 数, 白名单数)。
@@ -352,7 +380,7 @@ object ModuleRepo {
         apps: List<String>,
         procs: List<String>,
         white: List<String>,
-        whiteAsSkip: Boolean,
+        whiteProcs: List<String>,
         merge: Boolean,
     ): Triple<Int, Int, Int> {
         if (!Shell.rootOk()) return Triple(0, 0, 0)
@@ -373,18 +401,20 @@ object ModuleRepo {
         }
         writeFileRaw("perapp.conf", sbA.toString())
 
-        // per-proc：KILL 的带冒号条目 → force_stop；白名单选了 skip 的也走这里
+        // per-proc：KILL 的带冒号条目 → force_stop；WHITE 的带冒号条目 → skip。
+        // 顺序有意义：同一个进程两边都出现时按白名单算（用户明确写了 WHITE 就是不想动它）。
         val perproc = LinkedHashMap<String, String>()
         if (merge) {
             for (e in parsePerProc(readFileRaw("perproc.conf"))) perproc[e.first] = e.second
         }
         for (p in procs) perproc[p] = "force_stop"
-        if (whiteAsSkip) for (p in white) perproc[p] = "skip"
+        for (p in whiteProcs) perproc[p] = "skip"
         val sbP = StringBuilder("# 每进程覆盖配置：<进程名> mode=<sigkill|am_kill|force_stop|skip>\n")
         for ((p, m) in perproc) sbP.append(p).append(" mode=").append(m).append('\n')
         writeFileRaw("perproc.conf", sbP.toString())
 
-        // 白名单：写 protect.list；选了 skip 的也一并放进来（双保险，避免被当成普通应用）
+        // 白名单：只放 WHITE 的整包条目。带冒号的那些只压单个进程，包本身照常受管，
+        // 不能一并塞进 protect.list —— 那会把整个包都豁免掉，比用户要的范围大。
         val wSet = if (merge) list("protect.list").toMutableSet() else mutableSetOf("com.yg.appkiller")
         wSet.addAll(white)
         writeListNoReload("protect.list", "# 白名单（含 A0 导入）", wSet)
@@ -491,7 +521,13 @@ object ModuleRepo {
 
     fun startDaemon(ctx: Context?) {
         if (Shell.rootOk()) {
-            Shell.sh("mkdir -p " + MODDIR + "/logs " + MODDIR + "/run; nohup " + MODDIR + "/bin/appkillerd daemon -m " + MODDIR + " >> " + MODDIR + "/logs/stdout.log 2>&1 &", 5000)
+            // 先清热刷残留：临时解压目录带 module.prop，只要落在 /data/adb/modules 下就会被
+            // Magisk/KernelSU 当成第二个模块，管理器列表因重复 id 直接崩。热刷用的临时目录现在
+            // 放在 App 缓存里，但 pm install 会杀掉本进程、清理那一步常常跑不到，所以启用守护时
+            // 顺手把两处可能的残留都清一遍。
+            val tmp = if (ctx != null) ctx.cacheDir.absolutePath + "/hot" else ""
+            val clean = "rm -rf /data/adb/modules/appkiller.hot " + (if (tmp.isNotEmpty()) tmp else "") + "; "
+            Shell.sh(clean + "mkdir -p " + MODDIR + "/logs " + MODDIR + "/run; nohup " + MODDIR + "/bin/appkillerd daemon -m " + MODDIR + " >> " + MODDIR + "/logs/stdout.log 2>&1 &", 6000)
         }
     }
 

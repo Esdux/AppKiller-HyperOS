@@ -166,7 +166,7 @@ fun SettingsPage(
                 f
             }.getOrNull()
             if (zip == null || !zip.exists() || zip.length() < 1024) return@run "读取 zip 失败"
-            val (ok, msg) = ModuleRepo.hotInstall(zip.absolutePath)
+            val (ok, msg) = ModuleRepo.hotInstall(zip.absolutePath, context.cacheDir.absolutePath)
             zip.delete()
             if (ok) msg else "热刷入失败：" + msg
         }
