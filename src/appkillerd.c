@@ -870,7 +870,13 @@ void scan_round(void) {
         normalize_pkg(raw, pkg, sizeof(pkg));
         if (!pkg[0]) continue;
 
-        if (!pkg_should_manage(pkg, uid)) continue;    /* 黑白名单 / 系统应用默认策略 */
+        /* 白名单 / 系统应用默认保护：不处理，但仍要进运行列表。
+         * 用户需要看到「这个应用在后台，而且因为白名单不会被清」——只列可清理的，
+         * 会让白名单应用在列表里凭空消失，反而看不出它正在占内存。
+         * 硬保护（桌面、系统 UI、管理器自身）照旧直接跳过：它们常驻且 adj 为负，
+         * 列出来只是噪音。 */
+        int managed = pkg_should_manage(pkg, uid);
+        if (!managed && pkg_is_hard_protected(pkg)) continue;
 
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN) continue;
@@ -893,6 +899,7 @@ void scan_round(void) {
             scan[k].uid = uid;
         }
         scan[k].total++;
+        if (!managed)                         scan[k].exempt = 1;
         if (frz)                              scan[k].frozen++;
         else if (adj < g_cfg.active_adj)      scan[k].active++;
         else                                  scan[k].background++;
@@ -914,7 +921,7 @@ void scan_round(void) {
         b->uid       = scan[i].uid;
         b->frozen    = scan[i].frozen;
         b->total     = scan[i].total;
-        b->protected = pkg_is_protected(scan[i].pkg);
+        b->protected = scan[i].exempt || pkg_is_protected(scan[i].pkg);
         pkgent_t *pe = find_pkg(g_pkgs, &g_pkg_n, scan[i].pkg);
         b->since = pe ? pe->since : 0;
     }
@@ -922,6 +929,8 @@ void scan_round(void) {
     /* 合并到持久表 */
     for (int i = 0; i < g_pkg_n; i++) g_pkgs[i].seen = 0;
     for (int i = 0; i < sn; i++) {
+        /* 白名单包只展示、不参与计时，进 g_pkgs 只会白算一轮超时 */
+        if (scan[i].exempt) continue;
         pkgent_t *pe = find_pkg(g_pkgs, &g_pkg_n, scan[i].pkg);
         int reset = (scan[i].active > 0) || (scan[i].frozen == 0);
         if (reset) {

@@ -51,12 +51,14 @@ private val GroupTopShape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
 private val GroupBottomShape = RoundedCornerShape(bottomStart = 16.dp, bottomEnd = 16.dp)
 
 /**
- * 运行列表 = 全部后台应用，已冻结的在上、未冻结的在下。
+ * 运行列表 = 全部后台应用，分「即将去死」与「不处理」两段。
  *
  * 数据来自应用壳每秒刷新的 [DaemonState]（一份 flow，四个页面共享），本页不再自己开轮询。
  *
- * 为什么分两段：只有「已冻结」一段时，用户看不出那些后台活着但没被系统冻结的应用 ——
- * 它们不会被清理，但确实占着内存，是「为什么还这么卡」的答案。
+ * 分段依据是「会不会被清理」，不是「系统有没有冻结」：
+ *   - 即将去死 = 已冻结且不在白名单，计时到了就清理；
+ *   - 不处理   = 其余全部，含未冻结的（系统还没回收，我们不插手）与白名单的（冻结了也不清理）。
+ * 之前按 frozen 切，白名单应用一旦被系统冻结就会落到「即将去死」段里 —— 名字与事实相反。
  *
  * 段名用「即将去死」而不是「已冻结」：这一段的用户问题是"接下来会发生什么"，
  * 不是"系统现在把它标成了什么"。冻结是手段，清理才是结果。
@@ -68,9 +70,12 @@ fun RunningPage(
     state: DaemonState,
     onEntryClick: (String, String) -> Unit,
 ) {
-    val all = state.background
-    val frozen = remember(all) { all.filter { it.frozen } }
-    val others = remember(all) { all.filter { !it.frozen } }
+    // 先剔掉 PackageManager 解析不到的条目：daemon 是按 /proc/<pid>/cmdline 归包的，
+    // android.process.acore 这类是进程名而不是包名，列出来既没有图标也点不进去。
+    val all = resolveBackground(state.background)
+    // 会不会被清理，由「冻结 + 不在白名单」共同决定；白名单应用即使被系统冻结也不会被清
+    val dying = remember(all) { all.filter { it.frozen && !it.protected } }
+    val skipped = remember(all) { all.filter { !(it.frozen && !it.protected) } }
 
     PageScaffoldColumn(title = "运行列表", isBlurEnabled = isBlurEnabled) { innerPadding ->
         // 顶部 inset 在这里吃一次；列表的 contentPadding 不再重复算，否则上方会空一大块
@@ -84,14 +89,28 @@ fun RunningPage(
                 RunningBody(
                     loaded = state.loaded,
                     running = state.running,
-                    frozen = frozen,
-                    others = others,
+                    dying = dying,
+                    skipped = skipped,
                     labels = rememberAppLabels(all),
                     bottomPadding = bottomPadding,
                     onEntryClick = onEntryClick,
                 )
             }
         }
+    }
+}
+
+/**
+ * 只留下能在 PackageManager 里解析成应用的条目。
+ *
+ * 一次算完并 remember：每行单独查 pm 会在一轮几十个应用时把主线程拖死。
+ */
+@Composable
+private fun resolveBackground(apps: List<BgApp>): List<BgApp> {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    return remember(apps) {
+        val pm = ctx.packageManager
+        apps.filter { runCatching { pm.getApplicationInfo(it.pkg, 0) }.isSuccess }
     }
 }
 
@@ -130,49 +149,49 @@ private fun rememberAppIcon(pkg: String): ImageBitmap? {
 private fun RunningBody(
     loaded: Boolean,
     running: Boolean,
-    frozen: List<BgApp>,
-    others: List<BgApp>,
+    dying: List<BgApp>,
+    skipped: List<BgApp>,
     labels: Map<String, String>,
     bottomPadding: Dp,
     onEntryClick: (String, String) -> Unit,
 ) {
     AnimatedVisibility(visible = loaded, enter = fadeIn(), exit = fadeOut()) {
-        if (frozen.isEmpty() && others.isEmpty()) {
+        if (dying.isEmpty() && skipped.isEmpty()) {
             RunningEmptyHint(running = running, bottomPadding = bottomPadding)
         } else {
             LazyColumn(
                 contentPadding = PaddingValues(bottom = bottomPadding + DshSpacing.Block),
             ) {
-                if (frozen.isNotEmpty()) {
-                    item(key = "h-frozen") {
-                        SmallTitle(text = "即将去死 · " + frozen.size)
+                if (dying.isNotEmpty()) {
+                    item(key = "h-dying") {
+                        SmallTitle(text = "即将去死 · " + dying.size)
                     }
-                    items(frozen.size, key = { "f-" + frozen[it].pkg }) { i ->
-                        val app = frozen[i]
+                    items(dying.size, key = { "d-" + dying[it].pkg }) { i ->
+                        val app = dying[i]
                         val label = labels[app.pkg] ?: app.pkg
                         BgRow(
                             app = app,
                             label = label,
                             isFirst = i == 0,
-                            isLast = i == frozen.lastIndex,
-                            isOnly = frozen.size == 1,
+                            isLast = i == dying.lastIndex,
+                            isOnly = dying.size == 1,
                             onClick = { onEntryClick(app.pkg, label) },
                         )
                     }
                 }
-                if (others.isNotEmpty()) {
-                    item(key = "h-others") {
-                        SmallTitle(text = "未冻结 · " + others.size)
+                if (skipped.isNotEmpty()) {
+                    item(key = "h-skipped") {
+                        SmallTitle(text = "不处理 · " + skipped.size)
                     }
-                    items(others.size, key = { "o-" + others[it].pkg }) { i ->
-                        val app = others[i]
+                    items(skipped.size, key = { "s-" + skipped[it].pkg }) { i ->
+                        val app = skipped[i]
                         val label = labels[app.pkg] ?: app.pkg
                         BgRow(
                             app = app,
                             label = label,
                             isFirst = i == 0,
-                            isLast = i == others.lastIndex,
-                            isOnly = others.size == 1,
+                            isLast = i == skipped.lastIndex,
+                            isOnly = skipped.size == 1,
                             onClick = { onEntryClick(app.pkg, label) },
                         )
                     }
@@ -252,11 +271,16 @@ private fun BgRowContent(app: BgApp, label: String) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            // subtitle 是状态短语：冻结了多久、还剩多久；未冻结的直接说明为什么不会被清
+            // subtitle 是状态短语：会清的说还剩多久，不会清的直接说原因（白名单 / 不处理）。
+            // 文案形状统一成「已冻结|未冻结 · 白名单|不处理」，一眼能对上表格式的两列判断。
             MiuixText(
-                text = if (app.frozen)
-                    "已冻结 " + durationText(app.frozenSec) + " · 剩余 " + durationText(app.remainSec)
-                else "未冻结 · 系统尚未回收，不参与清理",
+                text = when {
+                    app.protected && app.frozen -> "已冻结 · 白名单"
+                    app.protected -> "未冻结 · 白名单"
+                    app.frozen ->
+                        "已冻结 " + durationText(app.frozenSec) + " · 剩余 " + durationText(app.remainSec)
+                    else -> "未冻结 · 不处理"
+                },
                 style = MiuixTheme.textStyles.body2,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -274,7 +298,8 @@ private fun BgRowContent(app: BgApp, label: String) {
         StatusTag(
             TagSpec(
                 label = app.frozenProcs.toString() + "/" + app.totalProcs + " 进程",
-                background = if (app.frozen) Color(60, 179, 113) else Color(0xFF9E9E9E),
+                // 只有「真的会被清」的才给绿标；白名单与未冻结一律灰，避免看起来像在倒计时
+                background = if (app.frozen && !app.protected) Color(60, 179, 113) else Color(0xFF9E9E9E),
                 contentColor = Color.White,
             ),
         )

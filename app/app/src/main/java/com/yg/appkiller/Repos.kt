@@ -564,8 +564,9 @@ data class FrozenApp(
 /**
  * 一个后台应用（含未冻结的）。
  *
- * 与 [FrozenApp] 的区别：FrozenApp 只表示「正在计时的」，本类覆盖全部后台包，
- * 用 [frozen] 区分两段。运行列表要显示「已冻结 / 未冻结」两段，就靠这个标志。
+ * 与 [FrozenApp] 的区别：FrozenApp 只表示「正在计时的」，本类覆盖全部后台包。
+ * 分段不只看 [frozen]：白名单应用即使被系统冻结也不会被清理，要和未冻结的一起归入「不处理」，
+ * 所以 [protected] 与 [frozen] 必须一起判断。
  */
 data class BgApp(
     val pkg: String,

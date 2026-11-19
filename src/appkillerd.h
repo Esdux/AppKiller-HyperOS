@@ -74,6 +74,7 @@ typedef struct {
     long long last_kill;
     int       killed_times;
     int       seen;       /* 本轮扫描是否仍见到该包 */
+    int       exempt;     /* 命中白名单：只展示、不处理 */
 } pkgent_t;
 
 /* 本轮扫描到的后台包（包内无可见进程），含未冻结的。
@@ -85,7 +86,7 @@ typedef struct {
     int       frozen;      /* 冻结进程数 */
     int       total;       /* 进程总数 */
     long long since;       /* 计时起点，0 = 未计时 */
-    int       protected;   /* 命中白名单 */
+    int       protected;   /* 不处理（命中白名单，永远不会被清理） */
 } bgpkg_t;
 
 typedef struct {
