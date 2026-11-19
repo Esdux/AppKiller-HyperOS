@@ -576,7 +576,12 @@ data class BgApp(
     val remainSec: Long,
     val frozenProcs: Int,
     val totalProcs: Int,
+    /** 命中显式白名单（protect.list），与「系统应用」分开：两者都受保护，但原因不同 */
     val protected: Boolean,
+    /** 系统应用（uid < 10000 或命中 system_apps.list） */
+    val sysapp: Boolean = false,
+    /** 本轮会不会被清理，分段就按它切 */
+    val managed: Boolean = true,
 )
 
 /** 守护进程 STATUS 报文的一次快照。 */
@@ -637,6 +642,8 @@ object StateRepo {
                             frozenProcs = o.optInt("frozen_procs"),
                             totalProcs = o.optInt("total_procs"),
                             protected = o.optBoolean("protected"),
+                            sysapp = o.optBoolean("sysapp"),
+                            managed = o.optBoolean("managed", true),
                         )
                     )
                 }

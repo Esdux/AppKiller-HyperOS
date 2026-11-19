@@ -73,9 +73,10 @@ fun RunningPage(
     // 先剔掉 PackageManager 解析不到的条目：daemon 是按 /proc/<pid>/cmdline 归包的，
     // android.process.acore 这类是进程名而不是包名，列出来既没有图标也点不进去。
     val all = resolveBackground(state.background)
-    // 会不会被清理，由「冻结 + 不在白名单」共同决定；白名单应用即使被系统冻结也不会被清
-    val dying = remember(all) { all.filter { it.frozen && !it.protected } }
-    val skipped = remember(all) { all.filter { !(it.frozen && !it.protected) } }
+    // 会不会被清理由 daemon 的 managed 直接给出：白名单、系统应用默认保护、输入法、
+    // persistent 四类都不处理，前端不必再重算一遍策略（重算迟早与 daemon 走岔）。
+    val dying = remember(all) { all.filter { it.managed && it.frozen } }
+    val skipped = remember(all) { all.filter { !(it.managed && it.frozen) } }
 
     PageScaffoldColumn(title = "运行列表", isBlurEnabled = isBlurEnabled) { innerPadding ->
         // 顶部 inset 在这里吃一次；列表的 contentPadding 不再重复算，否则上方会空一大块
@@ -275,8 +276,8 @@ private fun BgRowContent(app: BgApp, label: String) {
             // 文案形状统一成「已冻结|未冻结 · 白名单|不处理」，一眼能对上表格式的两列判断。
             MiuixText(
                 text = when {
-                    app.protected && app.frozen -> "已冻结 · 白名单"
-                    app.protected -> "未冻结 · 白名单"
+                    !app.managed && app.frozen -> "已冻结 · " + skipReason(app)
+                    !app.managed -> "未冻结 · " + skipReason(app)
                     app.frozen ->
                         "已冻结 " + durationText(app.frozenSec) + " · 剩余 " + durationText(app.remainSec)
                     else -> "未冻结 · 不处理"
@@ -298,12 +299,24 @@ private fun BgRowContent(app: BgApp, label: String) {
         StatusTag(
             TagSpec(
                 label = app.frozenProcs.toString() + "/" + app.totalProcs + " 进程",
-                // 只有「真的会被清」的才给绿标；白名单与未冻结一律灰，避免看起来像在倒计时
-                background = if (app.frozen && !app.protected) Color(60, 179, 113) else Color(0xFF9E9E9E),
+                // 只有「真的会被清」的才给绿标；不处理与未冻结一律灰，避免看起来像在倒计时
+                background = if (app.managed && app.frozen) Color(60, 179, 113) else Color(0xFF9E9E9E),
                 contentColor = Color.White,
             ),
         )
     }
+}
+
+/**
+ * 不处理的原因，一行说清。
+ *
+ * 顺序有意义：系统应用排在白名单前面 —— 一个包同时命中两者时，
+ * 「系统应用」才是用户真正需要知道的身份，白名单只是它的保护来源之一。
+ */
+private fun skipReason(app: BgApp): String = when {
+    app.sysapp -> "系统应用"
+    app.protected -> "白名单"
+    else -> "不处理"
 }
 
 /** 秒数转人话：120 秒 → 2 分钟，超过 1 小时才用小时。 */

@@ -638,6 +638,14 @@ int pkg_is_hard_protected(const char *pkg) {
  * a 这一路是关键：清单文件为空时旧实现会把系统应用全判成普通应用，
  * 于是 system_default=protect 形同虚设，系统应用照样被杀。
  */
+/* 系统应用判定：与 pkg_should_manage 的第 6 步完全同一套依据，
+ * 单独抽出来是为了让运行列表能把「系统应用」与「白名单」分开标注 ——
+ * 两者都受保护，但原因不同，混成一句「白名单」会让用户以为系统应用被手动加进去了。 */
+int pkg_is_system(const char *pkg, int uid) {
+    if (uid > 0 && uid < FIRST_APPLICATION_UID) return 1;
+    return pkg_in_list2(g_systemlist, g_systemlist_n, pkg);
+}
+
 int pkg_should_manage(const char *pkg, int uid) {
     if (pkg_is_hard_protected(pkg)) return 0;
     if (pkg_in_list2(g_blacklist, g_blacklist_n, pkg)) return 1;
@@ -877,6 +885,7 @@ void scan_round(void) {
          * 列出来只是噪音。 */
         int managed = pkg_should_manage(pkg, uid);
         if (!managed && pkg_is_hard_protected(pkg)) continue;
+        int is_sys = pkg_is_system(pkg, uid);
 
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN) continue;
@@ -900,6 +909,7 @@ void scan_round(void) {
         }
         scan[k].total++;
         if (!managed)                         scan[k].exempt = 1;
+        if (is_sys)                           scan[k].sysapp = 1;
         if (frz)                              scan[k].frozen++;
         else if (adj < g_cfg.active_adj)      scan[k].active++;
         else                                  scan[k].background++;
@@ -921,7 +931,11 @@ void scan_round(void) {
         b->uid       = scan[i].uid;
         b->frozen    = scan[i].frozen;
         b->total     = scan[i].total;
-        b->protected = scan[i].exempt || pkg_is_protected(scan[i].pkg);
+        /* 三态分开报：managed 决定会不会被清；protected 只表示显式白名单；
+         * sysapp 表示系统应用。前端按 managed 分段，按 protected/sysapp 出副标题。 */
+        b->managed   = pkg_should_manage(scan[i].pkg, scan[i].uid);
+        b->protected = pkg_is_protected(scan[i].pkg);
+        b->sysapp    = scan[i].sysapp;
         pkgent_t *pe = find_pkg(g_pkgs, &g_pkg_n, scan[i].pkg);
         b->since = pe ? pe->since : 0;
     }
@@ -1601,11 +1615,14 @@ void write_state(void) {
         if (rem < 0) rem = 0;
         fprintf(f, "%s\n    {\"pkg\": \"%s\", \"uid\": %d, \"frozen_procs\": %d, \"total_procs\": %d, "
                    "\"frozen\": %s, \"counting\": %s, \"frozen_sec\": %lld, \"remain_sec\": %lld, "
-                   "\"timeout_sec\": %d, \"protected\": %s}",
+                   "\"timeout_sec\": %d, \"managed\": %s, \"protected\": %s, \"sysapp\": %s}",
                 i ? "," : "", b->pkg, b->uid, b->frozen, b->total,
                 b->frozen > 0 ? "true" : "false",
                 b->since > 0 ? "true" : "false",
-                dur, rem, bto, b->protected ? "true" : "false");
+                dur, rem, bto,
+                b->managed ? "true" : "false",
+                b->protected ? "true" : "false",
+                b->sysapp ? "true" : "false");
     }
     fprintf(f, "%s],\n", g_bg_n ? "\n  " : "");
 
