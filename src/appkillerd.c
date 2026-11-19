@@ -884,12 +884,16 @@ void scan_round(void) {
          * 硬保护（桌面、系统 UI、管理器自身）照旧直接跳过：它们常驻且 adj 为负，
          * 列出来只是噪音。 */
         int managed = pkg_should_manage(pkg, uid);
-        if (!managed && pkg_is_hard_protected(pkg)) continue;
+        int is_core = pkg_is_hard_protected(pkg);
         int is_sys = pkg_is_system(pkg, uid);
 
         int adj = read_oom_adj(pid);
         if (adj == INT_MIN) continue;
-        if (adj < 0) continue;                    /* persistent / system-adj */
+        /* 常驻进程（adj < 0）：persistent、系统核心、前台服务。
+         * 以前直接跳过，运行列表就永远看不到桌面、SystemUI 这些常驻应用；
+         * Cirno 遍历 AMS 全部应用进程只跳 android，可见性对齐后这里只标记、不计数、不计时。
+     * 唯一的例外是硬保护包：它们不进运行列表（见下方 g_bg 构造）。 */
+        int is_always = adj < 0;
 
         int state = read_proc_state(pid);
         char cg[PATH_LEN];
@@ -910,8 +914,11 @@ void scan_round(void) {
         scan[k].total++;
         if (!managed)                         scan[k].exempt = 1;
         if (is_sys)                           scan[k].sysapp = 1;
+        if (is_core)                          scan[k].core = 1;
+        if (is_always)                        scan[k].always++;
         if (frz)                              scan[k].frozen++;
-        else if (adj < g_cfg.active_adj)      scan[k].active++;
+        else if (is_always)                   { }   /* 常驻不算后台 */
+        else if (adj < g_cfg.active_adj)    { scan[k].active++; scan[k].visible = 1; }
         else                                  scan[k].background++;
     }
     closedir(d);
@@ -919,9 +926,16 @@ void scan_round(void) {
     /* 重建后台包表：本轮所有「包内无可见进程」的应用，含未冻结的。
      * 运行列表要显示「全部后台应用并区分冻结状态」，而 g_pkgs 只保留正在计时的，
      * 单靠它会让未冻结的后台应用整片消失。 */
+    /* 可见性与 Cirno 对齐：只要该包有进程就列出来，前台、常驻、系统核心都算，
+     * 只跳「一个进程都没有」的（那种本来就不该出现）。以前按 active>0 过滤，
+     * 前台应用和桌面、SystemUI 全被挡在列表外，用户看不到它们在跑。 */
     g_bg_n = 0;
     for (int i = 0; i < sn && g_bg_n < MAX_PKGS; i++) {
-        if (scan[i].active > 0) continue;      /* 有可见进程 = 在前台，不算后台 */
+        if (scan[i].total <= 0) continue;
+        /* 硬保护包（桌面、SystemUI、电话、蓝牙、管理器自身）不进运行列表：
+         * 它们永远常驻、永远不会被清，列出来只是噪音，还占掉用户真正想看的行。
+         * 这类包在扫描阶段已经标记 core，这里直接跳过即可。 */
+        if (scan[i].core) continue;
         bgpkg_t *b = &g_bg[g_bg_n++];
         memset(b, 0, sizeof(*b));
         /* 输出前再归一化一次：只留包名、截掉 :子进程 后缀。
@@ -936,6 +950,11 @@ void scan_round(void) {
         b->managed   = pkg_should_manage(scan[i].pkg, scan[i].uid);
         b->protected = pkg_is_protected(scan[i].pkg);
         b->sysapp    = scan[i].sysapp;
+        b->core      = scan[i].core;
+        /* 整包常驻才算常驻：只要还有一个 adj>=0 的进程，这包就可能被冻结、被清，
+         * 不能因为其中一个进程是常驻就整包不计时（那会让该清的包永远不清）。 */
+        b->always    = scan[i].always > 0 && scan[i].always == scan[i].total;
+        b->visible   = scan[i].visible;
         pkgent_t *pe = find_pkg(g_pkgs, &g_pkg_n, scan[i].pkg);
         b->since = pe ? pe->since : 0;
     }
@@ -943,8 +962,10 @@ void scan_round(void) {
     /* 合并到持久表 */
     for (int i = 0; i < g_pkg_n; i++) g_pkgs[i].seen = 0;
     for (int i = 0; i < sn; i++) {
-        /* 白名单包只展示、不参与计时，进 g_pkgs 只会白算一轮超时 */
-        if (scan[i].exempt) continue;
+        /* 只展示、不参与计时的四类：白名单/系统默认保护、硬保护、常驻进程、前台可见。
+         * 前两类进 g_pkgs 只会白算一轮超时；后两类本来就活着，计时毫无意义。 */
+        if (scan[i].exempt || scan[i].core) continue;
+        if (scan[i].always > 0 && scan[i].always == scan[i].total) continue;
         pkgent_t *pe = find_pkg(g_pkgs, &g_pkg_n, scan[i].pkg);
         int reset = (scan[i].active > 0) || (scan[i].frozen == 0);
         if (reset) {
@@ -1615,14 +1636,18 @@ void write_state(void) {
         if (rem < 0) rem = 0;
         fprintf(f, "%s\n    {\"pkg\": \"%s\", \"uid\": %d, \"frozen_procs\": %d, \"total_procs\": %d, "
                    "\"frozen\": %s, \"counting\": %s, \"frozen_sec\": %lld, \"remain_sec\": %lld, "
-                   "\"timeout_sec\": %d, \"managed\": %s, \"protected\": %s, \"sysapp\": %s}",
+                   "\"timeout_sec\": %d, \"managed\": %s, \"protected\": %s, \"sysapp\": %s, "
+                   "\"core\": %s, \"always\": %s, \"visible\": %s}",
                 i ? "," : "", b->pkg, b->uid, b->frozen, b->total,
                 b->frozen > 0 ? "true" : "false",
                 b->since > 0 ? "true" : "false",
                 dur, rem, bto,
                 b->managed ? "true" : "false",
                 b->protected ? "true" : "false",
-                b->sysapp ? "true" : "false");
+                b->sysapp ? "true" : "false",
+                b->core ? "true" : "false",
+                b->always ? "true" : "false",
+                b->visible ? "true" : "false");
     }
     fprintf(f, "%s],\n", g_bg_n ? "\n  " : "");
 

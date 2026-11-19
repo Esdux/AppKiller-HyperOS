@@ -582,6 +582,12 @@ data class BgApp(
     val sysapp: Boolean = false,
     /** 本轮会不会被清理，分段就按它切 */
     val managed: Boolean = true,
+    /** 硬保护（桌面 / SystemUI / 管理器自身）：列出来只为看清它占了多少，永不处理 */
+    val core: Boolean = false,
+    /** 整包常驻（全部进程 adj < 0）：系统不冻它，我们也不计时 */
+    val always: Boolean = false,
+    /** 包内有前台可见进程 */
+    val visible: Boolean = false,
 )
 
 /** 守护进程 STATUS 报文的一次快照。 */
@@ -644,6 +650,9 @@ object StateRepo {
                             protected = o.optBoolean("protected"),
                             sysapp = o.optBoolean("sysapp"),
                             managed = o.optBoolean("managed", true),
+                            core = o.optBoolean("core"),
+                            always = o.optBoolean("always"),
+                            visible = o.optBoolean("visible"),
                         )
                     )
                 }

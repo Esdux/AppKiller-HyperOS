@@ -76,6 +76,9 @@ typedef struct {
     int       seen;       /* 本轮扫描是否仍见到该包 */
     int       exempt;     /* 不处理（白名单 / 系统应用默认保护 / 输入法 / persistent）：只展示 */
     int       sysapp;     /* 系统应用：uid < 10000 或命中 system_apps.list */
+    int       core;       /* 硬保护（桌面 / SystemUI / 管理器自身）：只展示，永不计时 */
+    int       always;     /* adj < 0 的常驻进程数；等于 total 才算「整包常驻」 */
+    int       visible;    /* 包内有可见进程（前台）：只展示，永不计时 */
 } pkgent_t;
 
 /* 本轮扫描到的后台包（包内无可见进程），含未冻结的。
@@ -90,6 +93,9 @@ typedef struct {
     int       protected;   /* 命中白名单（显式列出，不含系统应用默认保护） */
     int       sysapp;      /* 系统应用（默认保护时只展示，与白名单区分开） */
     int       managed;     /* 本轮是否会被清理 */
+    int       core;        /* 硬保护：管理器里标注「系统核心」 */
+    int       always;      /* 常驻进程（adj < 0） */
+    int       visible;     /* 前台可见 */
 } bgpkg_t;
 
 typedef struct {

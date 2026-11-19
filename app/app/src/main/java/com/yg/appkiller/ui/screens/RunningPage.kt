@@ -72,11 +72,16 @@ fun RunningPage(
 ) {
     // 先剔掉 PackageManager 解析不到的条目：daemon 是按 /proc/<pid>/cmdline 归包的，
     // android.process.acore 这类是进程名而不是包名，列出来既没有图标也点不进去。
+    // Cirno 遍历 AMS 拿的是 appInfo.packageName，本来就不会出现进程名；
+    // 我们靠这一道过滤达到同样的可见性。
     val all = resolveBackground(state.background)
     // 会不会被清理由 daemon 的 managed 直接给出：白名单、系统应用默认保护、输入法、
     // persistent 四类都不处理，前端不必再重算一遍策略（重算迟早与 daemon 走岔）。
-    val dying = remember(all) { all.filter { it.managed && it.frozen } }
-    val skipped = remember(all) { all.filter { !(it.managed && it.frozen) } }
+    // counting 必须一起判：包内还有前台进程时 daemon 会把计时清零（since=0），
+    // 这类包虽然此刻有冻结进程，却永远不会被清 —— 只按 frozen 分会掉进
+    // 「即将去死」并显示「已冻结 0 秒 · 剩余 0 秒」，那是自相矛盾的一行。
+    val dying = remember(all) { all.filter { it.managed && it.frozen && it.counting } }
+    val skipped = remember(all) { all.filter { !(it.managed && it.frozen && it.counting) } }
 
     PageScaffoldColumn(title = "运行列表", isBlurEnabled = isBlurEnabled) { innerPadding ->
         // 顶部 inset 在这里吃一次；列表的 contentPadding 不再重复算，否则上方会空一大块
@@ -275,12 +280,16 @@ private fun BgRowContent(app: BgApp, label: String) {
             // subtitle 是状态短语：会清的说还剩多久，不会清的直接说原因（白名单 / 不处理）。
             // 文案形状统一成「已冻结|未冻结 · 白名单|不处理」，一眼能对上表格式的两列判断。
             MiuixText(
+                // 会被清的（上段）报倒计时，其余报不被清的原因。
+                // 不能按属性优先级硬排：一个包可能既在冻结又在跑前台进程，
+                // 也可能命中黑名单的系统应用确实会被清 —— 那时写「前台」「系统应用」都是误导。
                 text = when {
-                    !app.managed && app.frozen -> "已冻结 · " + skipReason(app)
-                    !app.managed -> "未冻结 · " + skipReason(app)
-                    app.frozen ->
+                    app.managed && app.frozen && app.counting ->
                         "已冻结 " + durationText(app.frozenSec) + " · 剩余 " + durationText(app.remainSec)
-                    else -> "未冻结 · 不处理"
+                    // 没在计时的（包内有前台进程、或整包被豁免）不报秒数：
+                    // 那种行的 frozen_sec 恒为 0，「已冻结 0 秒」读起来像是故障。
+                    app.frozen -> "已冻结 · " + skipReason(app)
+                    else -> "未冻结 · " + skipReason(app)
                 },
                 style = MiuixTheme.textStyles.body2,
                 maxLines = 1,
@@ -314,8 +323,11 @@ private fun BgRowContent(app: BgApp, label: String) {
  * 「系统应用」才是用户真正需要知道的身份，白名单只是它的保护来源之一。
  */
 private fun skipReason(app: BgApp): String = when {
+    app.core -> "系统核心"
+    app.visible -> "前台"
     app.sysapp -> "系统应用"
     app.protected -> "白名单"
+    app.always -> "常驻"
     else -> "不处理"
 }
 
