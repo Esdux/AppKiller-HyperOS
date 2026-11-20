@@ -610,6 +610,20 @@ static const char *HARD_PROTECT[] = {
     "com.miui.home",
     /* 管理器自身：被清理后用户看不到界面也无法改配置 */
     "com.yg.appkiller",
+    /* 常驻系统守护：全部进程 adj < 0，系统不会冻它们，清理也没有意义。
+     * 列在运行列表里只是噪音（还占掉用户真正想看的行），统一并入硬保护。
+     * 这些包与下面的「整包 adj < 0 自动硬保护」重复，写死是为了不依赖扫描结果：
+     * 首次启动的第一轮扫描还没跑完时，静态名单已经生效。 */
+    "com.miui.powerinsight",
+    "system",
+    "org.ifaa.aidl.manager",
+    "com.xiaomi.xmsfkeeper",
+    "com.xiaomi.aon",
+    "com.tencent.soter.soterserver",
+    "com.qualcomm.location",
+    "com.qti.phone",
+    "com.android.se",
+    "android.ext.services",
     NULL
 };
 
@@ -936,6 +950,11 @@ void scan_round(void) {
          * 它们永远常驻、永远不会被清，列出来只是噪音，还占掉用户真正想看的行。
          * 这类包在扫描阶段已经标记 core，这里直接跳过即可。 */
         if (scan[i].core) continue;
+        /* 整包 adj < 0 自动等同硬保护：所有进程都是常驻（persistent / 系统守护），
+         * 系统既不会冻结也不会回收，我们更不会清理 —— 列出来只是噪音。
+         * 只看「整包」：包内只要还有一个 adj >= 0 的进程就照常列出，
+         * 那类包会被系统冻结、也会被我们清，藏起来反而看不到它正在占内存。 */
+        if (scan[i].always > 0 && scan[i].always == scan[i].total) continue;
         bgpkg_t *b = &g_bg[g_bg_n++];
         memset(b, 0, sizeof(*b));
         /* 输出前再归一化一次：只留包名、截掉 :子进程 后缀。
@@ -951,9 +970,9 @@ void scan_round(void) {
         b->protected = pkg_is_protected(scan[i].pkg);
         b->sysapp    = scan[i].sysapp;
         b->core      = scan[i].core;
-        /* 整包常驻才算常驻：只要还有一个 adj>=0 的进程，这包就可能被冻结、被清，
-         * 不能因为其中一个进程是常驻就整包不计时（那会让该清的包永远不清）。 */
-        b->always    = scan[i].always > 0 && scan[i].always == scan[i].total;
+        /* 能走到这里的必然不是整包常驻（上面已剔除），所以 always 恒为 false。
+         * 字段保留是为了让 App 端不必跟着改协议：旧版 UI 读不到 true 就按普通行渲染。 */
+        b->always    = 0;
         b->visible   = scan[i].visible;
         pkgent_t *pe = find_pkg(g_pkgs, &g_pkg_n, scan[i].pkg);
         b->since = pe ? pe->since : 0;
